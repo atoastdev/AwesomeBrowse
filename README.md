@@ -1,20 +1,26 @@
-# AwesomeBrowse 2
+# AwesomeBrowse 2.1.2-Renovo
 
-A clean, themeable, Chromium-based browser built on PyQt6 and Qt WebEngine.
+Renovo is the first GA release of AwesomeBrowse 2, built with PyQt6 and Qt WebEngine.
 
 ## Features
 
 - Sleek floating-tab interface with 29 themes and matching wallpapers
-- Tab groups, split view (dwindle tiling), and workspaces
+- Tab groups and workspaces
 - Chrome extension support (content scripts, storage, i18n)
 - Built-in RAM limiter with graceful degradation
 - YouTube Music player in the sidebar with a pinnable mini player
 - Reader mode, focus mode, command palette, notes, web panels
-- Three editions: 2.1.1 Stable, 2.1.0 Nightly, 2.0.0 Legacy
+- Selectable Renovo install with optional AwesomeSpace new-tab widgets
+- Wallpaper-backed translucent tabs, address bar, and toolbar pills
+- Hover-to-open sidebar with a setting to pin it visible; bookmarks bar is hidden by default
+- Live downloads pop-up with transfer progress, elapsed time, and speed
+- Print preview with installed-printer selection and PDF output
+- Per-site prompts for notifications, microphones, and cameras, with in-browser notification cards
+- Tab group chips and brief interface animations
 
 ## System requirements
 
-Python 3.10+, plus Qt system libraries on Linux.
+Python 3.10+, PyQt6, PyQt6-WebEngine, and psutil. QtMultimedia bindings are included with PyQt6; Linux users also need the Qt system libraries listed below.
 
 Debian / Ubuntu:
 
@@ -40,15 +46,18 @@ Arch:
     cd awesomebrowse
     ./install.sh
 
-That creates a virtual environment, installs the Python dependencies, and
-adds a launcher and application-menu entry.
+The installer asks which edition to install before it creates a virtual
+environment. Choose **AwesomeBrowse 2.1.2-Renovo** or **AwesomeBrowse
+2.1.2-Renovo with AwesomeSpace**. You can also select with
+`./install.sh --edition stable` or `./install.sh --edition space`. The choice
+is saved in the launcher, so it stays active after installation.
 
 Run it with:
 
     awesomebrowse
 If that fails:
 
-    python3 awesomebrowse_2.1.1.py
+    python3 awesomebrowse_2.1.2_renovo.py
 
 Or with flags:
 
@@ -75,9 +84,7 @@ too if you want to remove everything.
   will install but stay idle.
 - Tab sleeping uses Chromium's Discarded lifecycle state. A tab with unsaved
   form data can lose that data when slept.
-- Many features are broken/don't work properly, and I am aware of this and\
-  constantly working on fixing it. I appreciate any help!
-- Some CAPTCHAS may not work, but most sign ins are fine. 
+- CAPTCHA behavior is controlled by each site. Renovo uses Qt WebEngine's native Chromium identity for compatibility and does not bypass site checks.
 ## Licence
 
 GPL-3.0. See LICENSE.

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-AwesomeBrowse 2  (2.1.1)
+AwesomeBrowse 2  (2.1.2-Renovo, first GA release)
 A clean, themeable, Chromium-based browser built on Qt WebEngine.
 
-    pip install -r requirements.txt   # PyQt6, PyQt6-WebEngine, psutil
-    python awesomebrowse_2.1.1.py [url ...] [--private] [--profile ID] [--safe-mode]
+    pip install -r requirements.txt   # PyQt6, PyQt6-WebEngine, psutil (QtMultimedia is included with PyQt6)
+    python awesomebrowse_2.1.2_renovo.py [url ...] [--private] [--profile ID] [--safe-mode]
 """
 from __future__ import annotations
 
@@ -25,31 +25,38 @@ from string import Template
 from html import escape as html_escape
 from urllib.parse import quote_plus
 
-from PyQt6.QtCore import (QBuffer, QByteArray, QCoreApplication, QEasingCurve, QEvent, QFile, QIODevice,
-                          QObject, QPoint, QPointF, QPropertyAnimation, QRectF, QSize, QStandardPaths,
+from PyQt6.QtCore import (QBuffer, QByteArray, QCoreApplication, QEasingCurve, QEvent, QEventLoop, QFile, QIODevice,
+                          QMarginsF, QObject, QPoint, QPointF, QPropertyAnimation, QRectF, QSize, QStandardPaths,
                           QStringListModel, Qt, QThread, QTimer, QUrl, QVariantAnimation, pyqtSignal,
                           pyqtSlot)
 from PyQt6.QtGui import (QAction, QColor, QDesktopServices, QFontMetrics, QIcon, QKeySequence,
-                         QLinearGradient, QPainter, QPainterPath, QPalette, QPen, QPixmap, QTextCursor,
-                         QPolygonF, QShortcut)
+                         QLinearGradient, QMovie, QPageLayout, QPageSize, QPainter, QPainterPath, QPalette, QPen,
+                         QPixmap, QTextCursor, QPolygonF, QShortcut)
+from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtNetwork import QAuthenticator, QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PyQt6.QtPrintSupport import QPrintDialog, QPrinter
+from PyQt6.QtPrintSupport import QPrintPreviewWidget, QPrinter, QPrinterInfo
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWebEngineCore import (QWebEngineContextMenuRequest, QWebEngineDownloadRequest,
-                                   QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineSettings,
+                                   QWebEngineNotification, QWebEnginePage, QWebEngineProfile, QWebEngineScript, QWebEngineSettings,
                                    QWebEngineUrlRequestInfo, QWebEngineUrlRequestInterceptor,
                                    QWebEngineUrlRequestJob, QWebEngineUrlScheme,
                                    QWebEngineUrlSchemeHandler)
 from PyQt6.QtWebEngineWidgets import QWebEngineView
+try:
+    from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+    from PyQt6.QtMultimediaWidgets import QVideoWidget
+except ImportError:  # Static wallpapers still work when Qt Multimedia is unavailable.
+    QAudioOutput = QMediaPlayer = QVideoWidget = None
 from PyQt6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QCompleter, QDialog,
-                             QDockWidget, QFileDialog, QFrame, QGraphicsOpacityEffect, QGridLayout, QHBoxLayout,
-                             QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+                             QCheckBox, QDockWidget, QFileDialog, QFrame, QGraphicsBlurEffect,
+                             QGraphicsOpacityEffect, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                              QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
-                             QPushButton, QScrollArea, QSlider, QSplitter, QStackedWidget, QTabBar,
+                             QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QTabBar,
                              QToolButton, QVBoxLayout, QWidget, QWidgetAction)
 
 APP_NAME = "AwesomeBrowse 2"
-APP_VERSION = "2.1.1"
+SPACE_EDITION = os.environ.get("AWESOMEBROWSE_EDITION", "stable").strip().lower() == "space"
+APP_VERSION = "2.1.2-Renovo"
 SCHEME = "awesome"
 NEWTAB = "awesome://newtab"
 
@@ -75,6 +82,8 @@ DEFAULT_WIDGETS = [
     ("Reddit", "https://www.reddit.com"), ("Wikipedia", "https://www.wikipedia.org"),
     ("Gmail", "https://mail.google.com"), ("Maps", "https://maps.google.com"),
 ]
+if SPACE_EDITION:
+    DEFAULT_WIDGETS.insert(0, ("AwesomeSpace", "awesome://space"))
 
 TRACKER_DOMAINS = (
     "doubleclick.net", "googlesyndication.com", "googleadservices.com", "adservice.google.com",
@@ -213,7 +222,7 @@ SETTING_TYPES = {
     "wallpaper": str, "wallpaper_dim": int, "wallpaper_blur": int, "show_clock": bool,
     "show_widgets": bool, "clock_24h": bool,
     "description": str, "accent": str, "avatar_emoji": str, "animations": bool, "smooth_scroll": bool,
-    "lazy_restore": bool, "zoom_per_site": bool, "sidebar_open": bool,
+    "lazy_restore": bool, "zoom_per_site": bool, "sidebar_open": bool, "sidebar_always_visible": bool,
     "edition": str, "mini_player": bool,
 }
 
@@ -248,27 +257,33 @@ QSS = Template(r"""
 QWidget { color: $text; font-size: 13px; }
 QMainWindow, QDialog, QMessageBox, QInputDialog, QFileDialog { background: $bg; }
 QToolTip { background: $surface2; color: $text; border: 1px solid $border; padding: 5px 8px; border-radius: 6px; }
-#root, #chrome, #strip { background: $bg; }
-#toolbar { background: $surface; border-bottom: 1px solid $border; }
-#bookmarkbar { background: $surface; border-bottom: 1px solid $border; }
+#root, #chrome, #strip, #toolbar, #bookmarkbar, #browserBody, #viewhost { background: transparent; border: none; }
+#toolbar { border-bottom: 1px solid $glass_border; }
+#bookmarkbar { border-top: 1px solid $glass_border; }
 #findbar { background: $surface; border-top: 1px solid $border; }
-QToolButton { background: transparent; border: none; border-radius: 8px; }
+QToolButton { background: transparent; border: none; border-radius: 10px; }
 QToolButton:hover { background: $hover; }
 QToolButton:pressed { background: $border; }
 QToolButton#bm { padding: 0 9px; color: $text; border-radius: 7px; }
-QToolButton#tabclose { border-radius: 9px; }
-QToolButton#tabclose:hover { background: $border; }
+QToolButton#tabclose { border-radius: 9px; padding: 0; margin: 0; }
+QToolButton#tabclose:hover { background: $border_a; }
 QToolButton::menu-indicator { image: none; }
 QLineEdit { background: $surface2; border: 1px solid transparent; border-radius: 17px; padding: 0 10px;
             selection-background-color: $accent; selection-color: $on_accent; }
 QLineEdit:hover { border-color: $border; }
 QLineEdit:focus { border-color: $accent; background: $surface; }
 QLineEdit#find, QLineEdit#field { border-radius: 9px; border-color: $border; padding: 0 12px; min-height: 36px; }
-QTabBar { background: $bg; }
-QTabBar::tab { background: transparent; color: $sub; margin: 6px 1px 0 1px; padding: 0 8px 0 10px;
-               border-top-left-radius: 10px; border-top-right-radius: 10px; }
-QTabBar::tab:hover:!selected { background: $hover; }
-QTabBar::tab:selected { background: $surface; color: $text; }
+QLineEdit#address { background: $glass; border: 1px solid $glass_border; border-radius: 20px; padding: 0 15px; }
+QLineEdit#address:hover { border-color: $glass_highlight; }
+QLineEdit#address:focus { background: $glass; border-color: $accent; }
+QTabBar { background: transparent; }
+QTabBar::tab { background: $glass; color: $text; margin: 4px 3px 3px 2px; padding: 0 9px 0 11px;
+               border: 1px solid $glass_border; border-radius: 14px; }
+QTabBar::tab:hover:!selected { background: $surface_a; border-color: $glass_highlight; }
+QTabBar::tab:selected { background: $glass; border-color: $glass_highlight; color: $text; }
+#toolbar QToolButton { background: $glass; border: 1px solid $glass_border; border-radius: 17px; }
+#toolbar QToolButton:hover { background: $surface_a; border-color: $glass_highlight; }
+#toolbar QToolButton:pressed { background: $hover; }
 QProgressBar { border: none; background: transparent; max-height: 2px; min-height: 2px; }
 QProgressBar::chunk { background: $accent; }
 QMenu { background: $surface; border: 1px solid $border; border-radius: 12px; padding: 6px; }
@@ -296,11 +311,17 @@ QLabel#lead { color: $sub; font-size: 14px; }
 QLabel#muted { color: $sub; }
 QComboBox { background: $surface2; border: 1px solid $border; border-radius: 9px; padding: 7px 12px; }
 QComboBox QAbstractItemView { background: $surface; border: 1px solid $border; selection-background-color: $hover; selection-color: $text; outline: 0; }
+QSpinBox { background: $surface2; border: 1px solid $border; border-radius: 9px; padding: 4px 8px; min-height: 28px; }
 QLabel#h2 { font-size: 18px; font-weight: 650; }
 QLabel#bigstat { font-size: 30px; font-weight: 700; }
 QLabel#sect { font-size: 13px; font-weight: 650; color: $sub; padding-top: 8px; }
-#rail { background: $bg; border-right: 1px solid $border; }
-#sidepanel { background: $surface; border-right: 1px solid $border; }
+#sidebar { background: transparent; }
+#rail { background: $glass; border: 1px solid $glass_border; border-top-color: $glass_highlight; border-radius: 17px; }
+#sidepanel { background: $glass; border: 1px solid $glass_border; border-top-color: $glass_highlight; border-radius: 17px; }
+#sidepanel QLineEdit, #sidepanel QComboBox, #sidepanel QListWidget, #sidepanel QPlainTextEdit {
+    background: $surface_a; border-color: $glass_border; }
+#sidepanel QPushButton, #sidepanel QToolButton { background: $glass; border-color: $glass_border; }
+#sidepanel QPushButton:hover, #sidepanel QToolButton:hover { background: $surface_a; }
 #rail QToolButton:checked { background: $hover; }
 QWidget#panelbody { background: transparent; }
 QScrollArea { background: transparent; border: none; }
@@ -316,13 +337,41 @@ QPlainTextEdit#notes { background: $surface2; border: 1px solid $border; border-
 #selbar { background: $surface2; border: 1px solid $border; border-radius: 12px; }
 #selbar QPushButton { padding: 4px 12px; border-radius: 8px; }
 #selbar QToolButton { border-radius: 8px; }
-QFrame#pane { border: 1.5px solid transparent; border-radius: 8px; }
-QFrame#pane[focused="true"] { border-color: $accent; }
-QLabel#panetitle { color: $sub; font-size: 12px; }
-QSplitter::handle { background: transparent; }
-QSplitter::handle:hover { background: $hover; border-radius: 3px; }
+QToolButton#sidebarReveal { background: $glass; border: 1px solid $glass_border; border-left: none;
+                            border-top-right-radius: 10px; border-bottom-right-radius: 10px; }
+QToolButton#sidebarReveal:hover { background: $hover; }
+QWidget#sidebarHoverZone { background: transparent; }
+QWidget#printHeader { background: $surface; border-bottom: 1px solid $border; }
+QWidget#printFooter { background: $surface; border-top: 1px solid $border; }
+QFrame#printSetup { background: $surface; border-right: 1px solid $border; }
+QFrame#printStage { background: #edf0f4; border-radius: 14px; }
+QFrame#printStage QLabel { color: #344054; }
+QPrintPreviewWidget { background: #e9edf2; border: 1px solid #d4d9e0; border-radius: 12px; }
+QLabel#printHint { color: $sub; }
+QLabel#printSection { color: $sub; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+QToolButton#printNav { color: #344054; background: #ffffff; border: 1px solid #d4d9e0; border-radius: 8px; }
+QToolButton#printNav:hover { background: #f4f6f8; }
+QFrame#printStage QPushButton { color: #344054; background: #ffffff; border-color: #d4d9e0; }
+QFrame#printStage QPushButton:hover { background: #f4f6f8; }
 QDialog#palette { background: transparent; }
 QFrame#palettecard { background: $surface; border: 1px solid $border; border-radius: 16px; }
+QFrame#downloadPopup { background: $glass; border: 1px solid $glass_highlight; border-radius: 16px; }
+QFrame#downloadCard { background: $surface_a; border: 1px solid $glass_border; border-radius: 12px; }
+QScrollArea#downloadScroll, QWidget#downloadRows { background: transparent; border: none; }
+QLabel#downloadEmpty { color: $sub; padding: 8px 6px; }
+QLabel#downloadTitle { font-size: 15px; font-weight: 650; }
+QFrame#downloadPopup QToolButton { background: transparent; border: 1px solid transparent; padding: 5px 8px; }
+QFrame#downloadPopup QToolButton:hover { background: $surface_a; border-color: $glass_border; }
+QWidget#downloadActions QToolButton { color: $sub; padding: 4px 8px; }
+QWidget#downloadActions QToolButton:hover { color: $text; }
+QLabel#downloadName { font-weight: 600; }
+QFrame#siteNotification { background: $glass; border: 1px solid $glass_highlight; border-radius: 15px; }
+QFrame#siteNotification QLabel { background: transparent; }
+QLabel#notificationTitle { font-weight: 650; }
+QLabel#notificationMessage { color: $text; }
+QLabel#notificationOrigin { color: $sub; font-size: 11px; }
+QProgressBar#downloadProgress { border: none; background: $border; min-height: 5px; max-height: 5px; border-radius: 3px; }
+QProgressBar#downloadProgress::chunk { background: $accent; border-radius: 3px; }
 QLineEdit#paletteinput { border-radius: 10px; min-height: 42px; font-size: 15px; padding: 0 14px; border: 1px solid $border; background: $surface2; }
 QListWidget#palettelist { background: transparent; border: none; }
 QListWidget#palettelist::item { padding: 0; border-radius: 9px; }
@@ -337,10 +386,10 @@ QListView::item:selected { background: $hover; color: $text; }
 
 
 PILL_QSS = Template(r"""
-#toolbar, #bookmarkbar { background: $bg; border: none; }
-QTabBar::tab { margin: 5px 3px 5px 3px; padding: 0 8px 0 12px; border-radius: 15px; border: 1px solid transparent; }
-QTabBar::tab:hover:!selected { background: $hover; }
-QTabBar::tab:selected { background: $surface; border: 1px solid $border; }
+#toolbar, #bookmarkbar { background: transparent; border: none; }
+QTabBar::tab { margin: 4px 3px; padding: 0 8px 0 12px; border-radius: 15px; border: 1px solid $glass_border; }
+QTabBar::tab:hover:!selected { background: $surface_a; }
+QTabBar::tab:selected { background: $glass; border: 1px solid $glass_highlight; }
 QLineEdit { border-radius: 20px; padding: 0 16px; background: $surface; border: 1px solid $border; }
 QLineEdit:hover { border-color: $accent; }
 QLineEdit:focus { border-color: $accent; background: $surface; }
@@ -351,10 +400,14 @@ QToolButton#tabclose { border-radius: 9px; }
 QPushButton { border-radius: 15px; }
 QMenu { border-radius: 18px; padding: 8px; }
 QMenu::item { border-radius: 11px; padding: 8px 32px 8px 14px; }
-QFrame#pane { border-radius: 16px; }
-QFrame#pane[focused="true"] { border-width: 2px; }
-#rail { background: $bg; border-right: none; }
-#sidepanel { background: $surface; border: 1px solid $border; border-radius: 18px; margin: 0 6px 6px 0; }
+#rail { background: $glass; border: 1px solid $glass_border; border-top-color: $glass_highlight; border-radius: 18px; }
+#sidepanel { background: $glass; border: 1px solid $glass_border; border-top-color: $glass_highlight; border-radius: 18px; }
+#toolbar[zen="true"] { background: $glass; border-bottom: 1px solid $glass_border; }
+#strip[zen="true"] { background: $glass; border-bottom: 1px solid $glass_border; }
+QTabBar#tabs[zen="true"] { background: transparent; }
+QTabBar#tabs[zen="true"]::tab { background: transparent; border: 1px solid transparent; }
+QTabBar#tabs[zen="true"]::tab:selected { background: $glass; border-color: $glass_border; }
+QToolButton#sidebarReveal { border-radius: 0 10px 10px 0; }
 #selbar { border-radius: 16px; }
 QFrame#palettecard { border-radius: 22px; }
 QLabel#overlay { border-radius: 14px; }
@@ -375,7 +428,9 @@ QFrame#mini QToolButton { border-radius: 15px; }
 
 
 def build_qss(t: dict, edition: str = "nightly") -> str:
-    t2 = dict(t, surface_a=rgba(t["surface"], 0.8), border_a=rgba(t["border"], 0.9))
+    t2 = dict(t, surface_a=rgba(t["surface"], 0.8), border_a=rgba(t["border"], 0.9),
+              glass=rgba(t["surface"], 0.42), glass_border=rgba(t["text"], 0.25),
+              glass_highlight=rgba(t["text"], 0.42))
     q = QSS.safe_substitute(**t2)
     if edition == "stable":
         q += PILL_QSS.safe_substitute(**t2)
@@ -431,6 +486,8 @@ def _draw_glyph(p: QPainter, name: str) -> None:
         if name == "star_on":
             p.setBrush(p.pen().color())
         p.drawPolygon(QPolygonF(pts))
+    elif name == "spark":
+        line(12, 3, 12, 21); line(3, 12, 21, 12); line(5.5, 5.5, 18.5, 18.5); line(18.5, 5.5, 5.5, 18.5)
     elif name == "menu":
         line(4, 6.5, 20, 6.5); line(4, 12, 20, 12); line(4, 17.5, 20, 17.5)
     elif name == "plus":
@@ -446,6 +503,13 @@ def _draw_glyph(p: QPainter, name: str) -> None:
         p.drawEllipse(QRectF(3, 3, 18, 18)); p.drawEllipse(QRectF(8, 3, 8, 18)); line(3, 12, 21, 12)
     elif name == "download":
         line(12, 4, 12, 15); poly((7, 11), (12, 16), (17, 11)); line(5, 20, 19, 20)
+    elif name == "settings":
+        p.drawEllipse(QRectF(8, 8, 8, 8))
+        for a in range(0, 360, 45):
+            r1, r2 = math.radians(a), math.radians(a)
+            line(12 + 5.5 * math.cos(r1), 12 + 5.5 * math.sin(r1),
+                 12 + 9 * math.cos(r2), 12 + 9 * math.sin(r2))
+        p.drawEllipse(QRectF(10, 10, 4, 4))
     elif name == "fullscreen":
         poly((4, 9), (4, 4), (9, 4)); poly((15, 4), (20, 4), (20, 9))
         poly((20, 15), (20, 20), (15, 20)); poly((9, 20), (4, 20), (4, 15))
@@ -467,8 +531,6 @@ def _draw_glyph(p: QPainter, name: str) -> None:
         poly((12, 4), (21, 9), (12, 14), (3, 9), (12, 4)); poly((3, 13), (12, 18), (21, 13))
     elif name == "note":
         p.drawRoundedRect(QRectF(5, 3.5, 14, 17), 2, 2); line(8.5, 9, 15.5, 9); line(8.5, 13, 15.5, 13); line(8.5, 17, 12, 17)
-    elif name == "split":
-        p.drawRoundedRect(QRectF(3, 4, 18, 16), 3, 3); line(12, 4, 12, 20); line(12, 12, 21, 12)
     elif name == "group":
         p.drawRoundedRect(QRectF(3, 9, 18, 11), 3, 3); p.drawRoundedRect(QRectF(3, 4, 8, 3), 1.5, 1.5)
     elif name == "puzzle":
@@ -481,8 +543,6 @@ def _draw_glyph(p: QPainter, name: str) -> None:
         poly((15, 6), (9, 12), (15, 18))
     elif name == "chev_right":
         poly((9, 6), (15, 12), (9, 18))
-    elif name == "rotate":
-        p.drawArc(QRectF(5, 5, 14, 14), 30 * 16, 300 * 16); poly((15, 4), (19, 5), (18, 9))
     elif name == "music":
         p.drawEllipse(QRectF(3.5, 15, 5.5, 5)); line(9, 17.5, 9, 5); poly((9, 5), (19.5, 3), (19.5, 14)); p.drawEllipse(QRectF(14.5, 12, 5.5, 5))
     elif name == "play":
@@ -501,9 +561,9 @@ ICON_COLORS = {   # the stable edition gives every icon its own bright colour
     "back": "#4f9dff", "forward": "#4f9dff", "reload": "#34c98b", "stop": "#ff6b6b", "home": "#ff9f43", "star": "#ffc542",
     "star_on": "#ffc542", "menu": "#a78bfa", "plus": "#ff6bb5", "lock": "#34c98b", "warn": "#ffb020", "globe": "#38bdf8",
     "download": "#38bdf8", "fullscreen": "#60a5fa", "search": "#60a5fa", "up": "#60a5fa", "down": "#60a5fa",
-    "bookmark": "#f472b6", "sidebar": "#818cf8", "gauge": "#34d399", "layers": "#f59e0b", "note": "#fbbf24",
-    "split": "#2dd4bf", "group": "#fb7185", "puzzle": "#c084fc", "bolt": "#facc15", "panel": "#60a5fa",
-    "rotate": "#34d399", "music": "#ff5c7a", "play": "#ff5c7a", "pause": "#ff5c7a", "next": "#c084fc", "prev": "#c084fc",
+    "bookmark": "#f472b6", "sidebar": "#818cf8", "spark": "#d8b4fe", "gauge": "#34d399", "layers": "#f59e0b", "note": "#fbbf24",
+    "group": "#fb7185", "puzzle": "#c084fc", "bolt": "#facc15", "panel": "#60a5fa",
+    "music": "#ff5c7a", "play": "#ff5c7a", "pause": "#ff5c7a", "next": "#c084fc", "prev": "#c084fc",
     "sleep": "#a78bfa", "eyeoff": "#9ca3af",
 }
 
@@ -540,18 +600,15 @@ def logo_pixmap(size: int = 128) -> QPixmap:
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.scale(size / 128, size / 128)
-    g = QLinearGradient(0, 0, 128, 128)
-    g.setColorAt(0, QColor("#6aa0ff"))
-    g.setColorAt(1, QColor("#9b6bff"))
-    path = QPainterPath()
-    path.addRoundedRect(QRectF(6, 6, 116, 116), 32, 32)
-    p.fillPath(path, g)
-    pen = QPen(QColor("#ffffff"), 11)
+    accent = QColor("#8ab4ff")
+    pen = QPen(accent, 9)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     p.setPen(pen)
-    p.drawPolyline(QPolygonF([QPointF(40, 90), QPointF(64, 36), QPointF(88, 90)]))
-    p.drawLine(QPointF(50, 72), QPointF(78, 72))
+    p.drawArc(QRectF(27, 27, 74, 74), 40 * 16, 285 * 16)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(accent)
+    p.drawEllipse(QRectF(92, 28, 13, 13))
     p.end()
     return pm
 
@@ -806,14 +863,17 @@ def default_config(name: str, color: str, theme: str, engine: str) -> dict:
     return {
         "name": name, "color": color, "theme": theme, "search_engine": engine,
         "startup": "newtab", "homepage": "",
-        "show_bookmarks_bar": True, "show_home_button": True, "zoom_default": 100,
+        "show_bookmarks_bar": False, "show_home_button": True, "zoom_default": 100,
         "keep_cookies": True, "block_third_party_cookies": False, "block_trackers": True,
         "send_dnt": True, "force_dark_pages": False,
         "ask_download_location": False, "download_dir": str(Path.home() / "Downloads"),
         "wallpaper": "auto", "wallpaper_dim": 18, "wallpaper_blur": 0, "user_wallpapers": [],
         "accent": "", "description": "", "avatar_emoji": "", "accounts": [],
         "animations": True, "smooth_scroll": True, "lazy_restore": True, "zoom_per_site": True,
-        "sidebar_open": False, "sidebar_panel": "perf", "notes": "", "web_panels": [], "workspaces": [],
+        "sidebar_open": False, "sidebar_always_visible": False, "sidebar_panel": "perf", "notes": "", "web_panels": [], "workspaces": [],
+        "sidebar_order": ["perf", "work", "notes", "web", "music", "ai"],
+        "sidebar_panels": ["perf", "work", "notes", "web", "music", "ai"],
+        "ai_provider": "chatgpt",
         "zoom_by_host": {}, "extensions": [], "session_groups": {},
         "avatar_image": "", "edition": "stable", "mini_player": False,
         "show_clock": True, "show_widgets": True, "clock_24h": True,
@@ -845,7 +905,14 @@ class ProfileStore:
         except (OSError, ValueError):
             loaded = {}
         self.data = {**base, **loaded}
-
+        try:
+            ui_version = int(loaded.get("renovo_ui_version", 0) or 0)
+        except (TypeError, ValueError):
+            ui_version = 0
+        if ui_version < 1:
+            self.data["show_bookmarks_bar"] = False
+            self.data["renovo_ui_version"] = 1
+            self.save()
     def __getitem__(self, key):
         return self.data[key]
 
@@ -887,189 +954,8 @@ def smart_url(text: str, template: str) -> QUrl:
 # ═════════════════════════════════════════════════════════════════════════════
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Pure logic (no Qt): split layout, extension helpers, memory policy
+#  Pure logic (no Qt): extension helpers, memory policy
 # ═════════════════════════════════════════════════════════════════════════════
-
-class _Node:
-    __slots__ = ("item", "dir", "ratio", "a", "b", "parent")
-
-    def __init__(self, item=None):
-        self.item, self.dir, self.ratio = item, None, 0.5
-        self.a = self.b = self.parent = None
-
-    @property
-    def leaf(self) -> bool:
-        return self.a is None
-
-
-class DwindleTree:
-    """Hyprland-style dwindle layout. A new pane splits the focused pane in two;
-    the split follows that pane's aspect ratio (wide panes split side by side,
-    tall panes split top and bottom), and the new pane goes second."""
-
-    def __init__(self):
-        self.root: _Node | None = None
-
-    def __len__(self) -> int:
-        return len(self.items())
-
-    def __contains__(self, item) -> bool:
-        return self.find(item) is not None
-
-    def items(self) -> list:
-        out: list = []
-
-        def walk(n):
-            if n is None:
-                return
-            if n.leaf:
-                out.append(n.item)
-            else:
-                walk(n.a)
-                walk(n.b)
-        walk(self.root)
-        return out
-
-    def find(self, item) -> "_Node | None":
-        stack = [self.root]
-        while stack:
-            n = stack.pop()
-            if n is None:
-                continue
-            if n.leaf:
-                if n.item is item:
-                    return n
-            else:
-                stack.extend((n.a, n.b))
-        return None
-
-    def layout(self, w: float, h: float) -> dict:
-        rects: dict = {}
-
-        def walk(n, x, y, ww, hh):
-            if n.leaf:
-                rects[n.item] = (x, y, ww, hh)
-            elif n.dir == "h":
-                w1 = ww * n.ratio
-                walk(n.a, x, y, w1, hh)
-                walk(n.b, x + w1, y, ww - w1, hh)
-            else:
-                h1 = hh * n.ratio
-                walk(n.a, x, y, ww, h1)
-                walk(n.b, x, y + h1, ww, hh - h1)
-        if self.root is not None:
-            walk(self.root, 0.0, 0.0, float(w), float(h))
-        return rects
-
-    def add(self, item, target=None, w: float = 1000, h: float = 700) -> "_Node":
-        leaf = _Node(item)
-        if self.root is None:
-            self.root = leaf
-            return leaf
-        tn = self.find(target) if target is not None else None
-        if tn is None:
-            tn = self.find(self.items()[-1])
-        rect = self.layout(w, h).get(tn.item, (0, 0, w, h))
-        sp = _Node()
-        sp.dir = "h" if rect[2] >= rect[3] else "v"
-        parent = tn.parent
-        sp.parent = parent
-        if parent is None:
-            self.root = sp
-        elif parent.a is tn:
-            parent.a = sp
-        else:
-            parent.b = sp
-        sp.a, sp.b = tn, leaf
-        tn.parent = leaf.parent = sp
-        return sp
-
-    def remove(self, item) -> None:
-        n = self.find(item)
-        if n is None:
-            return
-        p = n.parent
-        if p is None:
-            self.root = None
-            return
-        sib = p.b if p.a is n else p.a
-        sib.parent = p.parent
-        if p.parent is None:
-            self.root = sib
-        elif p.parent.a is p:
-            p.parent.a = sib
-        else:
-            p.parent.b = sib
-
-    def swap(self, x, y) -> None:
-        nx, ny = self.find(x), self.find(y)
-        if nx and ny:
-            nx.item, ny.item = ny.item, nx.item
-
-    def rotate(self, item) -> None:
-        n = self.find(item)
-        if n and n.parent:
-            n.parent.dir = "v" if n.parent.dir == "h" else "h"
-
-    def neighbor(self, item, direction: str, w: float, h: float):
-        rects = self.layout(w, h)
-        r = rects.get(item)
-        if r is None:
-            return None
-        cx, cy = r[0] + r[2] / 2, r[1] + r[3] / 2
-        overlap = lambda a0, a1, b0, b1: min(a1, b1) - max(a0, b0) > 1
-        best, best_d = None, None
-        for it, (x, y, ww, hh) in rects.items():
-            if it is item:
-                continue
-            ox, oy = x + ww / 2, y + hh / 2
-            if direction == "left" and x + ww <= r[0] + 1 and overlap(y, y + hh, r[1], r[1] + r[3]):
-                d = cx - ox
-            elif direction == "right" and x >= r[0] + r[2] - 1 and overlap(y, y + hh, r[1], r[1] + r[3]):
-                d = ox - cx
-            elif direction == "up" and y + hh <= r[1] + 1 and overlap(x, x + ww, r[0], r[0] + r[2]):
-                d = cy - oy
-            elif direction == "down" and y >= r[1] + r[3] - 1 and overlap(x, x + ww, r[0], r[0] + r[2]):
-                d = oy - cy
-            else:
-                continue
-            if best_d is None or d < best_d:
-                best, best_d = it, d
-        return best
-
-    def to_data(self, key) -> dict | None:
-        def walk(n):
-            if n.leaf:
-                return {"t": key(n.item)}
-            return {"d": n.dir, "r": round(n.ratio, 4), "a": walk(n.a), "b": walk(n.b)}
-        return walk(self.root) if self.root else None
-
-    @classmethod
-    def from_data(cls, data, resolve) -> "DwindleTree":
-        tree = cls()
-
-        def build(d, parent):
-            if "t" in d:
-                item = resolve(d["t"])
-                if item is None:
-                    return None
-                n = _Node(item)
-                n.parent = parent
-                return n
-            n = _Node()
-            n.dir = d["d"] if d.get("d") in ("h", "v") else "h"
-            n.ratio = min(0.9, max(0.1, float(d.get("r", 0.5))))
-            n.parent = parent
-            n.a, n.b = build(d["a"], n), build(d["b"], n)
-            if n.a is None or n.b is None:  # a tab vanished: collapse to the survivor
-                keep = n.a or n.b
-                if keep:
-                    keep.parent = parent
-                return keep
-            return n
-        if data:
-            tree.root = build(data, None)
-        return tree
 
 
 # ── Chrome extension helpers ────────────────────────────────────────────────
@@ -1244,9 +1130,10 @@ input[type=range]{accent-color:var(--accent);width:100%}
 NEWTAB_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>New tab</title>
 <style>/*__ROOT__*/
 /*__BASE__*/
+html,body{background:transparent!important}
 body{overflow:hidden}
-.wall{position:fixed;inset:-40px;background-size:cover;background-position:center;transition:filter .3s}
-.veil{position:fixed;inset:0;background:#000;pointer-events:none;transition:opacity .3s}
+.wall{display:none!important}
+.veil{display:none!important}
 .scroll{position:fixed;inset:0;overflow:auto;z-index:1}
 .chip{position:fixed;top:18px;left:20px;z-index:3;display:flex;align-items:center;gap:10px;padding:5px 16px 5px 5px;border-radius:999px;background:var(--glass);backdrop-filter:blur(16px);border:1px solid var(--glass-border);color:var(--text);font-weight:500}
 .chip:hover{border-color:var(--accent)}
@@ -1272,9 +1159,9 @@ main{min-height:100%;display:flex;flex-direction:column;align-items:center;justi
 .tile{position:relative;width:96px;display:flex;flex-direction:column;align-items:center;gap:9px;color:#fff;transition:transform .15s}
 .tile:hover{transform:translateY(-3px)}
 .tile.drag{opacity:.35}
-.ico{width:64px;height:64px;border-radius:19px;background:var(--glass);border:1px solid var(--glass-border);backdrop-filter:blur(18px);display:grid;place-items:center;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.ico{width:64px;height:64px;border-radius:19px;background:var(--accent-soft);border:1px solid var(--glass-border);backdrop-filter:blur(18px);display:grid;place-items:center;overflow:hidden;box-shadow:0 8px 24px rgba(0,0,0,.25)}
 .ico img{width:34px;height:34px;border-radius:8px}
-.ico b{font-size:24px;font-weight:700;color:#fff}
+.ico b{font-size:24px;font-weight:700;color:var(--accent)}
 .lbl{font-size:12.5px;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-shadow:0 1px 8px rgba(0,0,0,.7)}
 .tools{position:absolute;top:-7px;right:0;display:none;gap:4px}
 .tile:hover .tools{display:flex}
@@ -1318,6 +1205,20 @@ button.add{border:0;background:transparent;cursor:pointer;font:inherit}
 body.noanim *,body.noanim *:before{animation:none!important;transition:none!important}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 @media (max-width:640px){#clock{font-size:64px}}
+@media print{
+ html,body{height:auto!important;overflow:visible!important;background:#fff!important;color:#17191d!important}
+ .wall,.veil,.chip,.fab,#panel,#modal,.tools,.eng,#engmenu,.go{display:none!important}
+ .scroll{position:static;overflow:visible}
+ main{min-height:0;padding:16px 18px;gap:18px}
+ #clock,#greet,.lbl,.tile{color:#17191d!important;text-shadow:none!important}
+ #clock{font-size:42px}
+ #greet{font-size:14px}
+ .search{width:100%;max-width:none;background:#fff;border:1px solid #d1d5db;box-shadow:none;backdrop-filter:none}
+ .search input{color:#17191d}
+ .grid{width:100%;grid-template-columns:repeat(5,minmax(64px,1fr));gap:12px 8px}
+ .ico{background:#f1f3f5;border:1px solid #d6d9de;box-shadow:none;backdrop-filter:none}
+ .ico img{max-width:28px;max-height:28px}
+}
 </style></head><body>
 <div class="wall" id="wall"></div><div class="veil"></div>
 <a class="chip" href="awesome://settings/profile" title="Profile settings"><span class="av" id="av"></span><span id="pname"></span></a>
@@ -1358,13 +1259,7 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 function set(k,v){S[k]=v;ready(()=>bridge.setSetting(k,JSON.stringify(v)))}
 function wpUrl(id){if(id==='auto')return 'awesome://wallpaper/theme/'+S.theme+'.svg';if(id.startsWith('theme:'))return 'awesome://wallpaper/theme/'+id.slice(6)+'.svg';return id.startsWith('user:')?'awesome://wallpaper/user/'+encodeURIComponent(id.slice(5)):'awesome://wallpaper/'+id+'.svg'}
 const isVid=id=>id.startsWith('user:')&&/\.(mp4|webm|m4v|mov|ogv)$/i.test(id);
-let vidFor=null;
-function paintWall(){const w=$('#wall');w.style.filter='blur('+S.wallpaper_blur+'px)';$('.veil').style.opacity=S.wallpaper_dim/100;
-  if(isVid(S.wallpaper)){if(vidFor===S.wallpaper)return;vidFor=S.wallpaper;w.style.backgroundImage='none';w.innerHTML='';
-    const v=document.createElement('video');v.muted=true;v.loop=true;v.autoplay=true;v.playsInline=true;v.style.cssText='width:100%;height:100%;object-fit:cover';w.appendChild(v);
-    fetch(wpUrl(S.wallpaper)).then(r=>r.blob()).then(b=>{if(vidFor!==S.wallpaper)return;v.src=URL.createObjectURL(b);v.play().catch(()=>{})}).catch(()=>{w.innerHTML='';w.style.backgroundImage='url("awesome://wallpaper/theme/'+S.theme+'.svg")'})}
-  else{vidFor=null;w.innerHTML='';w.style.backgroundImage='url("'+wpUrl(S.wallpaper)+'")'}}
-document.addEventListener('visibilitychange',()=>{const v=document.querySelector('#wall video');if(v)document.hidden?v.pause():v.play().catch(()=>{})});
+function paintWall(){const w=$('#wall');w.style.filter='none';w.style.backgroundImage='none';w.innerHTML='';$('.veil').style.opacity=0}
 function tick(){const d=new Date(),g=d.getHours();let h=g;const m=String(d.getMinutes()).padStart(2,'0');
   h=S.clock_24h?String(h).padStart(2,'0'):(h%12||12);$('#clock').textContent=h+':'+m;
   $('#greet').textContent=(g<5?'Good night':g<12?'Good morning':g<18?'Good afternoon':'Good evening')+', '+S.name}
@@ -1378,17 +1273,17 @@ function paintEng(){$('#engname').textContent=eng().label;
   $('#engmenu').querySelectorAll('button').forEach(b=>b.onclick=()=>{set('search_engine',b.dataset.id);paintEng();$('#engmenu').classList.remove('open');$('#q').focus()})}
 $('#engbtn').onclick=e=>{e.stopPropagation();$('#engmenu').classList.toggle('open')};
 document.addEventListener('click',()=>$('#engmenu').classList.remove('open'));
-function hue(s){let h=0;for(const c of s)h=(h*31+c.charCodeAt(0))%360;return h}
 function host(u){try{return new URL(u).hostname}catch(e){return u}}
 function renderGrid(){const g=$('#grid');const first=!renderGrid.done;renderGrid.done=true;
   g.innerHTML=S.widgets.map((w,n)=>{const h=host(w.url),l=(w.name||h).trim();
-    return `<a class="tile${first?' enter':''}" style="animation-delay:${220+n*45}ms" draggable="true" data-id="${w.id}" href="${esc(w.url)}"><span class="ico" style="background-image:linear-gradient(135deg,hsla(${hue(h)},60%,55%,.55),hsla(${(hue(h)+40)%360},60%,40%,.35))"><img alt="" src="https://icons.duckduckgo.com/ip3/${esc(h)}.ico" onerror="this.replaceWith(Object.assign(document.createElement('b'),{textContent:'${((l.match(/[A-Za-z0-9]/)||['?'])[0]).toUpperCase()}'}))"></span><span class="lbl">${esc(l)}</span><span class="tools"><button class="tool" data-a="edit" title="Edit">&#9998;</button><button class="tool" data-a="del" title="Remove">&times;</button></span></a>`}).join('')
+    return `<a class="tile${first?' enter':''}" style="animation-delay:${220+n*45}ms" draggable="true" data-id="${w.id}" href="${esc(w.url)}"><span class="ico"><img alt="" src="https://icons.duckduckgo.com/ip3/${esc(h)}.ico" onerror="this.replaceWith(Object.assign(document.createElement('b'),{textContent:'${((l.match(/[A-Za-z0-9]/)||['?'])[0]).toUpperCase()}'}))"></span><span class="lbl">${esc(l)}</span><span class="tools"><button class="tool" data-a="edit" title="Edit">&#9998;</button><button class="tool" data-a="del" title="Remove">&times;</button></span></a>`}).join('')
    +`<button class="tile add" id="addw"><span class="ico">+</span><span class="lbl">Add shortcut</span></button>`;
   g.querySelectorAll('.tile[data-id]').forEach(t=>{
     t.querySelectorAll('.tool').forEach(b=>b.onclick=e=>{e.preventDefault();e.stopPropagation();const id=t.dataset.id;b.dataset.a==='del'?delWidget(id):openModal(id)});
     t.ondragstart=e=>{dragId=t.dataset.id;t.classList.add('drag');e.dataTransfer.effectAllowed='move'};
     t.ondragend=()=>{t.classList.remove('drag');dragId=null};
-    t.ondragover=e=>{e.preventDefault();if(!dragId||dragId===t.dataset.id)return;const a=S.widgets.findIndex(w=>w.id===dragId),b=S.widgets.findIndex(w=>w.id===t.dataset.id);const [m]=S.widgets.splice(a,1);S.widgets.splice(b,0,m);renderGrid();saveWidgets()}});
+    t.ondragover=e=>{e.preventDefault();e.dataTransfer.dropEffect='move'};
+    t.ondrop=e=>{e.preventDefault();e.stopPropagation();if(!dragId||dragId===t.dataset.id)return;const a=S.widgets.findIndex(w=>w.id===dragId),b=S.widgets.findIndex(w=>w.id===t.dataset.id);if(a<0||b<0)return;const [m]=S.widgets.splice(a,1);S.widgets.splice(b,0,m);dragId=null;renderGrid();saveWidgets()}});
   $('#addw').onclick=()=>openModal(null)}
 let dragId=null,editId=null;
 function saveWidgets(){ready(()=>bridge.saveWidgets(JSON.stringify(S.widgets)))}
@@ -1468,7 +1363,7 @@ kbd{font:12px ui-monospace,Consolas,monospace;background:var(--surface2);border:
 .av2{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:700}
 </style></head><body><div class="shell">
 <aside class="side"><h1>Settings</h1><nav class="nav" id="nav">
-<a data-s="profile">Profile</a><a data-s="appearance">Appearance</a><a data-s="search">Search engine</a><a data-s="startup">On startup</a><a data-s="privacy">Privacy and cookies</a><a data-s="downloads">Downloads</a><a data-s="experimental">Experimental</a><a data-href="awesome://extensions">Extensions</a><a data-s="about">About</a></nav></aside>
+<a data-s="profile">Profile</a><a data-s="appearance">Appearance</a><a data-s="search">Search engine</a><a data-s="startup">On startup</a><a data-s="privacy">Privacy and cookies</a><a data-s="downloads">Downloads</a><a data-s="experimental">Advanced</a><a data-href="awesome://extensions">Extensions</a><a data-s="about">About</a></nav></aside>
 <div class="main"><div class="wrap">
 <div class="top"><input class="text" id="find" placeholder="Search settings" autocomplete="off"></div>
 
@@ -1516,6 +1411,7 @@ kbd{font:12px ui-monospace,Consolas,monospace;background:var(--surface2);border:
  <div class="card"><h3>Protection</h3>
   <div class="row"><div class="t"><b>Block ads and trackers</b><small>Blocks requests to well-known advertising and tracking domains.</small></div><label class="switch"><input type="checkbox" data-key="block_trackers"><span></span></label></div>
   <div class="row"><div class="t"><b>Send &ldquo;Do Not Track&rdquo; request</b></div><label class="switch"><input type="checkbox" data-key="send_dnt"><span></span></label></div></div>
+ <div class="card"><h3>Site permissions</h3><p class="muted">When a site requests notifications, your microphone, or your camera, AwesomeBrowse asks before access is granted. Choose Allow or Block in the site prompt.</p></div>
  <div class="card"><h3>Clear browsing data</h3>
   <label class="opt"><input type="checkbox" id="c_history" checked><span>Browsing history</span></label>
   <label class="opt"><input type="checkbox" id="c_cookies" checked><span>Cookies and site data <span class="pill">signs you out</span></span></label>
@@ -1528,14 +1424,15 @@ kbd{font:12px ui-monospace,Consolas,monospace;background:var(--surface2);border:
  <div class="row"><div class="t"><b>Ask where to save each file</b></div><label class="switch"><input type="checkbox" data-key="ask_download_location"><span></span></label></div></div>
 </section>
 
-<section class="sec" data-s="experimental"><h2>Experimental</h2>
- <div class="card"><h3>Edition and features</h3>
-  <div class="row"><div class="t"><b>Edition</b><small>Stable is the new floating look. Nightly is the previous look with every feature. Legacy is the classic 2.0 interface without the sidebar and split view.</small></div><select data-key="edition"><option value="stable">2.1.1 Stable</option><option value="nightly">2.1.0 Nightly</option><option value="legacy">2.0.0 Legacy</option></select></div>
+<section class="sec" data-s="experimental"><h2>Advanced</h2>
+ <div class="card"><h3>Interface and features</h3>
+  <div class="row"><div class="t"><b>Interface style</b><small>Renovo uses floating tabs and the current layout. Classic keeps the earlier 2.1 layout. Legacy uses the classic 2.0 interface without the sidebar.</small></div><select data-key="edition"><option value="stable">2.1.2-Renovo</option><option value="nightly">Classic 2.1</option><option value="legacy">Legacy 2.0</option></select></div>
   <div class="row"><div class="t"><b>Animations</b><small>Tab open and close, tab switching, panels and the new tab page. Turn off for a flatter, snappier feel.</small></div><label class="switch"><input type="checkbox" data-key="animations"><span></span></label></div>
   <div class="row"><div class="t"><b>Smooth scrolling</b><small>Takes effect on the next page load.</small></div><label class="switch"><input type="checkbox" data-key="smooth_scroll"><span></span></label></div>
   <div class="row"><div class="t"><b>Load restored tabs on demand</b><small>After a restart, tabs load only when you open them. Much faster startup and lower memory.</small></div><label class="switch"><input type="checkbox" data-key="lazy_restore"><span></span></label></div>
   <div class="row"><div class="t"><b>Remember zoom for each site</b></div><label class="switch"><input type="checkbox" data-key="zoom_per_site"><span></span></label></div>
-  <div class="row"><div class="t"><b>Open the sidebar at startup</b><small>The memory limiter lives in the sidebar. Press Ctrl+B any time.</small></div><label class="switch"><input type="checkbox" data-key="sidebar_open"><span></span></label></div></div>
+  <div class="row"><div class="t"><b>Open the sidebar at startup</b><small>Press Ctrl+B, or hover the left edge of the page.</small></div><label class="switch"><input type="checkbox" data-key="sidebar_open"><span></span></label></div>
+  <div class="row"><div class="t"><b>Keep sidebar visible</b><small>Pin it open in every window for this profile.</small></div><label class="switch"><input type="checkbox" data-key="sidebar_always_visible"><span></span></label></div></div>
 </section>
 
 <section class="sec" data-s="about"><h2>About AwesomeBrowse 2</h2>
@@ -1545,6 +1442,9 @@ kbd{font:12px ui-monospace,Consolas,monospace;background:var(--surface2);border:
  <tr><td>Address bar</td><td><kbd>Ctrl</kbd> <kbd>L</kbd></td></tr>
  <tr><td>Find in page</td><td><kbd>Ctrl</kbd> <kbd>F</kbd></td></tr>
  <tr><td>Bookmark this page</td><td><kbd>Ctrl</kbd> <kbd>D</kbd></td></tr>
+ <tr><td>Toggle sidebar / customize panels</td><td><kbd>Ctrl</kbd> <kbd>B</kbd></td></tr>
+ <tr><td>Zen mode</td><td><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Z</kbd> or <kbd>Esc</kbd></td></tr>
+ <tr><td>Print preview</td><td><kbd>Ctrl</kbd> <kbd>P</kbd></td></tr>
  <tr><td>Full screen</td><td><kbd>F11</kbd></td></tr>
  <tr><td>Developer tools / view source</td><td><kbd>F12</kbd> &nbsp; <kbd>Ctrl</kbd> <kbd>U</kbd></td></tr>
  <tr><td>Private window</td><td><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>N</kbd></td></tr>
@@ -1783,11 +1683,6 @@ class RequestInterceptor(QWebEngineUrlRequestInterceptor):
         self.store = store
 
     def interceptRequest(self, info: QWebEngineUrlRequestInfo) -> None:
-
-        info.setHttpHeader(QByteArray(b"Sec-Ch-Ua"), QByteArray(b""))
-        info.setHttpHeader(QByteArray(b"Sec-Ch-Ua-Mobile"), QByteArray(b""))
-        info.setHttpHeader(QByteArray(b"Sec-Ch-Ua-Platform"), QByteArray(b""))
-
         data = self.store.data
         if data.get("block_trackers"):
             host = info.requestUrl().host()
@@ -1852,6 +1747,10 @@ class DownloadManager(QObject):
         super().__init__(ctx)
         self.ctx = ctx
         self.live: dict[str, dict] = {}
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setSingleShot(True)
+        self._progress_timer.setInterval(220)
+        self._progress_timer.timeout.connect(self.changed.emit)
         ctx.profile.downloadRequested.connect(self.on_request)
 
     @staticmethod
@@ -1882,16 +1781,30 @@ class DownloadManager(QObject):
             req.setDownloadFileName(name)
         req.accept()
         uid = uuid.uuid4().hex
+        now = time.time()
         rec = {"id": uid, "name": req.downloadFileName(), "url": req.url().toString(),
                "path": os.path.join(req.downloadDirectory(), req.downloadFileName()),
-               "time": time.time(), "state": "progress", "received": 0, "total": 0, "req": req}
+               "time": now, "state": "progress", "received": 0, "total": 0,
+               "elapsed": 0.0, "speed": 0.0, "_started_mono": time.monotonic(),
+               "_last_sample_mono": time.monotonic(), "_last_sample_bytes": 0, "req": req}
         self.live[uid] = rec
         req.receivedBytesChanged.connect(lambda r=rec, q=req: self._progress(r, q))
+        if hasattr(req, "totalBytesChanged"):
+            req.totalBytesChanged.connect(lambda r=rec, q=req: self._progress(r, q))
         req.stateChanged.connect(lambda st, r=rec: self._state(r, st))
         self.changed.emit()
 
     def _progress(self, rec, req) -> None:
-        rec["received"], rec["total"] = req.receivedBytes(), max(0, req.totalBytes())
+        received = max(0, req.receivedBytes())
+        rec["received"], rec["total"] = received, max(0, req.totalBytes())
+        now = time.monotonic()
+        rec["elapsed"] = max(0.0, now - rec["_started_mono"])
+        interval = now - rec["_last_sample_mono"]
+        if interval >= 0.2:
+            rec["speed"] = max(0.0, received - rec["_last_sample_bytes"]) / interval
+            rec["_last_sample_mono"], rec["_last_sample_bytes"] = now, received
+        if not self._progress_timer.isActive():
+            self._progress_timer.start()
 
     def _state(self, rec, state) -> None:
         S = QWebEngineDownloadRequest.DownloadState
@@ -1900,21 +1813,28 @@ class DownloadManager(QObject):
         rec["state"] = {S.DownloadCompleted: "done", S.DownloadCancelled: "cancelled"}.get(state, "failed")
         rec["received"] = rec["req"].receivedBytes()
         rec["total"] = max(rec["total"], rec["req"].totalBytes())
+        rec["elapsed"] = max(0.0, time.monotonic() - rec["_started_mono"])
+        rec["speed"] = 0.0
         self.live.pop(rec["id"], None)
         if not self.ctx.private:
-            saved = {k: v for k, v in rec.items() if k != "req"}
+            saved = {k: v for k, v in rec.items() if k != "req" and not k.startswith("_")}
             self.ctx.store.data["downloads"].insert(0, saved)
             del self.ctx.store.data["downloads"][100:]
             self.ctx.store.save()
         else:
-            self.ctx.private_done.insert(0, {k: v for k, v in rec.items() if k != "req"})
+            self.ctx.private_done.insert(0, {k: v for k, v in rec.items() if k != "req" and not k.startswith("_")})
         self.finishedItem.emit(rec["id"])
         self.changed.emit()
 
     def records(self) -> list[dict]:
         out = []
+        now, monotonic_now = time.time(), time.monotonic()
         for r in self.live.values():
-            out.append({k: v for k, v in r.items() if k != "req"} | {"exists": True})
+            item = {k: v for k, v in r.items() if k != "req" and not k.startswith("_")}
+            item["elapsed"] = max(0.0, now - r.get("time", now))
+            if monotonic_now - r.get("_last_sample_mono", monotonic_now) > 1.5:
+                item["speed"] = 0.0
+            out.append(item | {"exists": True})
         done = self.ctx.private_done if self.ctx.private else self.ctx.store["downloads"]
         for r in done:
             out.append({**r, "exists": os.path.exists(r.get("path", ""))})
@@ -1944,7 +1864,7 @@ class DownloadManager(QObject):
 
 
 class SchemeHandler(QWebEngineUrlSchemeHandler):
-    """Serves awesome:// pages and wallpapers."""
+    """Serves awesome:// pages, AwesomeSpace, and wallpapers."""
 
     def __init__(self, ctx: "Context"):
         super().__init__(ctx)
@@ -1987,15 +1907,16 @@ class Context(QObject):
             policy = (QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies if store["keep_cookies"]
                       else QWebEngineProfile.PersistentCookiesPolicy.NoPersistentCookies)
             self.profile.setPersistentCookiesPolicy(policy)
-        # Read the real Chromium version before the user-agent is replaced.
+        # Use the engine's native identity consistently. Spoofing a Firefox UA
+        # on Chromium while stripping Chromium client hints breaks sign-in and
+        # CAPTCHA compatibility checks on some sites.
         self.chromium = (re.search(r"Chrome/([\d.]+)", self.profile.httpUserAgent()) or [None, "unknown"])[1]
-        self.profile.setHttpUserAgent(
-            "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0"
-        )
         self.interceptor = RequestInterceptor(store)
         self.profile.setUrlRequestInterceptor(self.interceptor)
         self.handler = SchemeHandler(self)
         self.profile.installUrlSchemeHandler(QByteArray(SCHEME.encode()), self.handler)
+        if hasattr(self.profile, "setNotificationPresenter"):
+            self.profile.setNotificationPresenter(self.present_notification)
         for attr, val in (("FullScreenSupportEnabled", True), ("ScrollAnimatorEnabled", bool(store["smooth_scroll"])),
                           ("JavascriptCanOpenWindows", True), ("ScreenCaptureEnabled", True),
                           ("DnsPrefetchEnabled", True), ("PdfViewerEnabled", True)):
@@ -2009,6 +1930,15 @@ class Context(QObject):
         if not private:
             self.extensions = ExtensionManager(self)
             self.extensions.message.connect(lambda m, st=store: app.extensions_changed(st, m))
+
+    def present_notification(self, notification: QWebEngineNotification) -> None:
+        windows = [w for w in self.app.windows if getattr(w, "ctx", None) is self and not getattr(w, "_closing", False)]
+        if windows:
+            active = QApplication.activeWindow()
+            target = active if active in windows else windows[-1]
+            target.show_web_notification(notification)
+        else:
+            notification.close()
 
     def apply_scroll(self) -> None:
         a = getattr(QWebEngineSettings.WebAttribute, "ScrollAnimatorEnabled", None)
@@ -2062,8 +1992,12 @@ class Bridge(QObject):
             return
         try:
             items = json.loads(raw)
-            clean = [{"id": str(w["id"])[:16], "name": str(w["name"])[:40], "url": str(w["url"])[:2000]}
-                     for w in items if re.match(r"^https?://", str(w.get("url", "")))]
+            clean = []
+            for w in items:
+                url = str(w.get("url", ""))
+                if not re.match(r"^https?://", url) and not (SPACE_EDITION and url == "awesome://space"):
+                    continue
+                clean.append({"id": str(w["id"])[:16], "name": str(w["name"])[:40], "url": url[:2000]})
         except (ValueError, KeyError, TypeError, AttributeError):
             return
         self.ctx.store.set("widgets", clean[:200])
@@ -2094,9 +2028,13 @@ class Bridge(QObject):
         if not self._ok() or name not in store["user_wallpapers"]:
             return
         store.data["user_wallpapers"].remove(name)
-        if store["wallpaper"] == "user:" + name:
+        selected = store["wallpaper"] == "user:" + name
+        if selected:
             store.data["wallpaper"] = "auto"
         store.save()
+        if selected:
+            for window in self.ctx.app.windows_of(store):
+                window.wallpaper_layer.set_wallpaper()
         try:
             (store.dir / "wallpapers" / os.path.basename(name)).unlink()
         except OSError:
@@ -2275,6 +2213,55 @@ class Bridge(QObject):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  Website permission prompt
+# ═════════════════════════════════════════════════════════════════════════════
+
+class WebPermissionDialog(QDialog):
+    DETAILS = {
+        "Notifications": ("Notifications", "Let this site show alerts from AwesomeBrowse."),
+        "MediaAudioCapture": ("Microphone", "Let this site access your microphone."),
+        "MediaVideoCapture": ("Camera", "Let this site access your webcam."),
+        "MediaAudioVideoCapture": ("Camera and microphone", "Let this site access your webcam and microphone."),
+        "Geolocation": ("Location", "Let this site access your approximate location."),
+        "DesktopVideoCapture": ("Screen sharing", "Let this site capture your screen."),
+        "DesktopAudioVideoCapture": ("Screen and audio sharing", "Let this site capture your screen and system audio."),
+    }
+
+    def __init__(self, parent, origin: QUrl, permission_name: str):
+        super().__init__(parent)
+        label, description = self.DETAILS.get(permission_name, (WebPage._nice(permission_name).capitalize(),
+                                                                 "Let this site use the requested feature."))
+        host = origin.host() or origin.toString()
+        self.setWindowTitle("Site permission")
+        self.setMinimumWidth(420)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(10)
+        heading = QLabel(f"Allow {label.lower()}?")
+        heading.setObjectName("h2")
+        site = QLabel(host)
+        site.setObjectName("muted")
+        site.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        detail = QLabel(description)
+        detail.setWordWrap(True)
+        layout.addWidget(heading)
+        layout.addWidget(site)
+        layout.addWidget(detail)
+        layout.addSpacing(8)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        deny = QPushButton("Block")
+        allow = QPushButton("Allow")
+        allow.setProperty("primary", True)
+        allow.setDefault(True)
+        deny.clicked.connect(self.reject)
+        allow.clicked.connect(self.accept)
+        buttons.addWidget(deny)
+        buttons.addWidget(allow)
+        layout.addLayout(buttons)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  Pages and views
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -2311,6 +2298,10 @@ class WebPage(QWebEnginePage):
             return False
         if is_main:
             want = url.scheme() == SCHEME
+            if want and url.host() == "newtab":
+                self.setBackgroundColor(QColor(0, 0, 0, 0))
+            else:
+                self.setBackgroundColor(QColor(255, 255, 255))
             if want != self._chan_on:
                 try:
                     self.setWebChannel(self.channel if want else None)
@@ -2383,20 +2374,28 @@ class WebPage(QWebEnginePage):
 
     @staticmethod
     def _nice(name: str) -> str:
-        return re.sub(r"(?<!^)(?=[A-Z])", " ", name).lower()
+        known = {
+            "Notifications": "notifications", "MediaAudioCapture": "microphone",
+            "MediaVideoCapture": "camera", "MediaAudioVideoCapture": "camera and microphone",
+            "Geolocation": "location", "DesktopVideoCapture": "screen sharing",
+            "DesktopAudioVideoCapture": "screen and audio sharing",
+        }
+        return known.get(name, re.sub(r"(?<!^)(?=[A-Z])", " ", name).lower())
 
-    def _ask(self, host: str, what: str) -> bool:
-        r = QMessageBox.question(self.window, "Permission request", f"Allow {host} to use {what}?")
-        return r == QMessageBox.StandardButton.Yes
+    def _ask(self, origin: QUrl, permission_name: str) -> bool:
+        if self.window is None:
+            return False
+        dialog = WebPermissionDialog(self.window, origin, permission_name)
+        return dialog.exec() == QDialog.DialogCode.Accepted
 
     def _permission(self, perm) -> None:
-        what = self._nice(perm.permissionType().name)
-        perm.grant() if self._ask(perm.origin().host() or "this page", what) else perm.deny()
+        name = perm.permissionType().name
+        perm.grant() if self._ask(perm.origin(), name) else perm.deny()
 
     def _feature(self, origin: QUrl, feature) -> None:
         key = (origin.host(), feature)
         P = QWebEnginePage.PermissionPolicy
-        if key in self._granted or self._ask(origin.host(), self._nice(feature.name)):
+        if key in self._granted or self._ask(origin, feature.name):
             self._granted.add(key)
             self.setFeaturePermission(origin, feature, P.PermissionGrantedByUser)
         else:
@@ -2548,7 +2547,7 @@ class Spark(QWidget):
 
 
 class ContentArea(QStackedWidget):
-    """Holds the tab views and the split view. `flash` fades a veil away to
+    """Holds the active tab view. `flash` fades a veil away to
     soften tab switches without touching the web content itself."""
 
     def __init__(self):
@@ -2632,6 +2631,10 @@ class GroupDialog(QDialog):
         head = QLabel(title)
         head.setObjectName("h2")
         lay.addWidget(head)
+        hint = QLabel("Name the group and choose a color to identify its tabs.")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
         self.name = QLineEdit(name)
         self.name.setObjectName("field")
         self.name.setPlaceholderText("Name this group, like Research or Sprint 12")
@@ -2642,6 +2645,7 @@ class GroupDialog(QDialog):
         self.swatches: list[Swatch] = []
         for c in GROUP_COLORS:
             s = Swatch(c)
+            s.setToolTip(f"Group color {c}")
             s.on = c == self.color
             s.clicked.connect(self._pick)
             self.swatches.append(s)
@@ -2670,6 +2674,300 @@ class GroupDialog(QDialog):
 
     def values(self) -> tuple[str, str]:
         return self.name.text().strip(), self.color
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Print interface
+# ═════════════════════════════════════════════════════════════════════════════
+
+class PrintPreviewDialog(QDialog):
+    def __init__(self, owner: "MainWindow", printer: QPrinter, title: str):
+        super().__init__(owner)
+        self.owner, self.printer = owner, printer
+        self.setObjectName("printInterface")
+        self.setWindowTitle("Print")
+        self.setMinimumSize(920, 620)
+        self.resize(1180, 780)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        header = QWidget()
+        header.setObjectName("printHeader")
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(22, 14, 22, 14)
+        hl.setSpacing(12)
+        mark = QLabel()
+        mark.setPixmap(owner.app.logo_icon.pixmap(24, 24))
+        hl.addWidget(mark)
+        heading = QVBoxLayout()
+        heading.setSpacing(1)
+        title_label = QLabel("Print page")
+        title_label.setStyleSheet("font-size:16px;font-weight:650")
+        self.subtitle = QLabel(title or "Web page")
+        self.subtitle.setObjectName("printHint")
+        self.subtitle.setMaximumWidth(520)
+        self.subtitle.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        heading.addWidget(title_label)
+        heading.addWidget(self.subtitle)
+        hl.addLayout(heading, 1)
+        root.addWidget(header)
+
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+
+        setup = QFrame()
+        setup.setObjectName("printSetup")
+        setup.setFixedWidth(258)
+        form = QVBoxLayout(setup)
+        form.setContentsMargins(17, 18, 17, 16)
+        form.setSpacing(8)
+        section = QLabel("PAGE SETUP")
+        section.setObjectName("printSection")
+        form.addWidget(section)
+
+        self.printer_choice = QComboBox()
+        self.printer_names = list(QPrinterInfo.availablePrinterNames())
+        default_printer = QPrinterInfo.defaultPrinterName()
+        if self.printer_names:
+            for printer_name in self.printer_names:
+                suffix = " · Default" if printer_name == default_printer else ""
+                self.printer_choice.addItem(printer_name + suffix, printer_name)
+            selected = self.printer_choice.findData(default_printer)
+            self.printer_choice.setCurrentIndex(selected if selected >= 0 else 0)
+            self.printer.setPrinterName(self.printer_choice.currentData())
+        else:
+            self.printer_choice.addItem("No printers found", "")
+            self.printer_choice.setEnabled(False)
+        form.addWidget(QLabel("Printer"))
+        form.addWidget(self.printer_choice)
+
+        self.paper = QComboBox()
+        for label, page_id in (("A4", QPageSize.PageSizeId.A4), ("Letter", QPageSize.PageSizeId.Letter),
+                               ("A3", QPageSize.PageSizeId.A3), ("A5", QPageSize.PageSizeId.A5),
+                               ("Legal", QPageSize.PageSizeId.Legal)):
+            self.paper.addItem(label, page_id)
+        form.addWidget(QLabel("Paper size"))
+        form.addWidget(self.paper)
+
+        self.orientation = QComboBox()
+        self.orientation.addItem("Portrait", QPageLayout.Orientation.Portrait)
+        self.orientation.addItem("Landscape", QPageLayout.Orientation.Landscape)
+        form.addWidget(QLabel("Orientation"))
+        form.addWidget(self.orientation)
+
+        self.margins = QComboBox()
+        for label, size in (("Default · 12 mm", 12), ("Narrow · 6 mm", 6),
+                            ("Wide · 20 mm", 20), ("None", 0)):
+            self.margins.addItem(label, size)
+        form.addWidget(QLabel("Margins"))
+        form.addWidget(self.margins)
+
+        self.color = QComboBox()
+        self.color.addItem("Color", QPrinter.ColorMode.Color)
+        self.color.addItem("Grayscale", QPrinter.ColorMode.GrayScale)
+        form.addWidget(QLabel("Output"))
+        form.addWidget(self.color)
+
+        self.copies = QSpinBox()
+        self.copies.setRange(1, 99)
+        self.copies.setValue(1)
+        form.addWidget(QLabel("Copies"))
+        form.addWidget(self.copies)
+        form.addStretch(1)
+        setup_hint = QLabel("Preview updates with your settings.")
+        setup_hint.setObjectName("printHint")
+        setup_hint.setWordWrap(True)
+        form.addWidget(setup_hint, 0)
+        body_layout.addWidget(setup)
+
+        stage = QFrame()
+        stage.setObjectName("printStage")
+        stage_layout = QVBoxLayout(stage)
+        stage_layout.setContentsMargins(18, 16, 18, 18)
+        stage_layout.setSpacing(12)
+        nav = QHBoxLayout()
+        preview_title = QLabel("PREVIEW")
+        preview_title.setObjectName("printSection")
+        nav.addWidget(preview_title)
+        nav.addStretch(1)
+        self.previous = QToolButton()
+        self.previous.setObjectName("printNav")
+        self.previous.setText("‹")
+        self.previous.setFixedSize(32, 30)
+        self.previous.setToolTip("Previous page")
+        self.page_number = QSpinBox()
+        self.page_number.setRange(1, 1)
+        self.page_number.setFixedWidth(62)
+        self.page_total = QLabel("of 0 pages")
+        self.page_total.setObjectName("printHint")
+        self.next = QToolButton()
+        self.next.setObjectName("printNav")
+        self.next.setText("›")
+        self.next.setFixedSize(32, 30)
+        self.next.setToolTip("Next page")
+        nav.addWidget(self.previous)
+        nav.addWidget(self.page_number)
+        nav.addWidget(self.page_total)
+        nav.addWidget(self.next)
+        nav.addSpacing(12)
+        zoom_out = QToolButton()
+        zoom_out.setObjectName("printNav")
+        zoom_out.setText("−")
+        zoom_out.setFixedSize(32, 30)
+        zoom_out.setToolTip("Zoom out")
+        fit = QPushButton("Fit page")
+        fit.setFixedHeight(30)
+        fit.setToolTip("Fit the full page in the preview")
+        fit_width = QPushButton("Fit width")
+        fit_width.setFixedHeight(30)
+        fit_width.setToolTip("Fit the page width in the preview")
+        zoom_in = QToolButton()
+        zoom_in.setObjectName("printNav")
+        zoom_in.setText("+")
+        zoom_in.setFixedSize(32, 30)
+        zoom_in.setToolTip("Zoom in")
+        nav.addWidget(zoom_out)
+        nav.addWidget(fit)
+        nav.addWidget(fit_width)
+        nav.addWidget(zoom_in)
+        stage_layout.addLayout(nav)
+
+        self.preview = QPrintPreviewWidget(printer, stage)
+        self.preview.setObjectName("printPreview")
+        self.preview.setMinimumSize(500, 420)
+        self.preview.setSinglePageViewMode()
+        preview_palette = QPalette(self.preview.palette())
+        preview_palette.setColor(QPalette.ColorRole.Window, QColor("#e9edf2"))
+        preview_palette.setColor(QPalette.ColorRole.Base, QColor("#e9edf2"))
+        preview_palette.setColor(QPalette.ColorRole.Dark, QColor("#d4d9e0"))
+        self.preview.setPalette(preview_palette)
+        self.preview.setAutoFillBackground(True)
+        self.preview.paintRequested.connect(owner._print_document)
+        self.preview.previewChanged.connect(self.refresh_page_controls)
+        stage_layout.addWidget(self.preview, 1)
+        body_layout.addWidget(stage, 1)
+        root.addWidget(body, 1)
+        self._preview_initialized = False
+
+        footer = QWidget()
+        footer.setObjectName("printFooter")
+        actions = QHBoxLayout(footer)
+        actions.setContentsMargins(20, 12, 20, 12)
+        footer_hint = QLabel("Send to a printer or save a PDF.")
+        footer_hint.setObjectName("printHint")
+        actions.addWidget(footer_hint, 1)
+        cancel = QPushButton("Cancel")
+        self.pdf_button = QPushButton("Save as PDF")
+        actions.addWidget(self.pdf_button)
+        self.print_button = QPushButton("Print")
+        self.print_button.setProperty("primary", True)
+        self.print_button.setMinimumWidth(112)
+        self.print_button.setEnabled(bool(self.printer_names))
+        actions.addWidget(cancel)
+        actions.addWidget(self.print_button)
+        root.addWidget(footer)
+
+        self.paper.currentIndexChanged.connect(self.update_printer_settings)
+        self.printer_choice.currentIndexChanged.connect(self.select_printer)
+        self.orientation.currentIndexChanged.connect(self.update_printer_settings)
+        self.margins.currentIndexChanged.connect(self.update_printer_settings)
+        self.color.currentIndexChanged.connect(self.update_printer_settings)
+        self.copies.valueChanged.connect(self.update_printer_settings)
+        self.page_number.valueChanged.connect(self.preview.setCurrentPage)
+        self.previous.clicked.connect(lambda: self.preview.setCurrentPage(max(1, self.preview.currentPage() - 1)))
+        self.next.clicked.connect(lambda: self.preview.setCurrentPage(
+            min(max(1, self.preview.pageCount()), self.preview.currentPage() + 1)))
+        zoom_out.clicked.connect(self.preview.zoomOut)
+        zoom_in.clicked.connect(self.preview.zoomIn)
+        fit.clicked.connect(self.preview.fitInView)
+        fit_width.clicked.connect(self.preview.fitToWidth)
+        cancel.clicked.connect(self.reject)
+        self.print_button.clicked.connect(self.print_to_device)
+        self.pdf_button.clicked.connect(self.save_pdf)
+        self.select_printer()
+        self.update_printer_settings()
+        QTimer.singleShot(0, self.initialize_preview)
+
+    def initialize_preview(self) -> None:
+        # Fit after the dialog has been shown and layouts have assigned the
+        # preview its final viewport size. Fitting at construction time uses a
+        # zero-sized viewport and can leave the first page awkwardly scaled.
+        if not self.preview.isVisible():
+            QTimer.singleShot(50, self.initialize_preview)
+            return
+        self.preview.fitInView()
+        self.preview.updatePreview()
+        self._preview_initialized = True
+        self.refresh_page_controls()
+
+    def update_printer_settings(self, *_args) -> None:
+        self.printer.setPageSize(QPageSize(self.paper.currentData()))
+        self.preview.setOrientation(self.orientation.currentData())
+        margin = float(self.margins.currentData())
+        self.printer.setFullPage(margin == 0)
+        self.printer.setPageMargins(QMarginsF(margin, margin, margin, margin), QPageLayout.Unit.Millimeter)
+        self.printer.setColorMode(self.color.currentData())
+        self.printer.setCopyCount(self.copies.value())
+        if self._preview_initialized:
+            self.preview.updatePreview()
+            QTimer.singleShot(0, self.refresh_page_controls)
+
+    def select_printer(self, *_args) -> None:
+        name = self.printer_choice.currentData()
+        if not name:
+            return
+        self.printer.setPrinterName(name)
+        info = QPrinterInfo.printerInfo(name)
+        if not info.isNull() and info.defaultPageSize().isValid():
+            page_index = self.paper.findData(info.defaultPageSize().id())
+            if page_index >= 0:
+                self.paper.setCurrentIndex(page_index)
+        self.update_printer_settings()
+
+    def refresh_page_controls(self) -> None:
+        count = self.preview.pageCount()
+        current = max(1, self.preview.currentPage())
+        self.page_number.blockSignals(True)
+        self.page_number.setRange(1, max(1, count))
+        self.page_number.setValue(min(current, max(1, count)))
+        self.page_number.blockSignals(False)
+        self.page_total.setText(f"of {count} page{'s' if count != 1 else ''}" if count else "Preparing preview…")
+        self.previous.setEnabled(count > 1 and current > 1)
+        self.next.setEnabled(count > 1 and current < count)
+
+    def print_to_device(self) -> None:
+        self.print_button.setEnabled(False)
+        self.print_button.setText("Printing…")
+        QApplication.processEvents()
+        if self.owner._print_document(self.printer):
+            self.accept()
+        else:
+            self.print_button.setEnabled(True)
+            self.print_button.setText("Print")
+
+    def save_pdf(self) -> None:
+        default_name = re.sub(r'[\\/:*?"<>|]+', "_", self.subtitle.text() or "Web page") + ".pdf"
+        initial = os.path.join(self.owner.store["download_dir"], default_name)
+        path, _ = QFileDialog.getSaveFileName(self, "Save print output as PDF", initial, "PDF files (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        self.printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        self.printer.setOutputFileName(path)
+        QApplication.processEvents()
+        ok = self.owner._print_document(self.printer)
+        self.printer.setOutputFileName("")
+        self.printer.setOutputFormat(QPrinter.OutputFormat.NativeFormat)
+        if ok:
+            self.owner.toast(f"Saved PDF: {os.path.basename(path)}")
+            self.accept()
+        else:
+            QMessageBox.warning(self, "PDF export failed", "The page could not be rendered as a PDF.")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2716,8 +3014,9 @@ class TabBar(QTabBar):
         return d if isinstance(d, dict) else {}
 
     def _chip_width(self, i: int) -> int:
-        label = self.provider(i).get("label", "") if self.provider else ""
-        return QFontMetrics(self.font()).horizontalAdvance(label) + 34
+        info = self.provider(i) if self.provider else {}
+        metrics = QFontMetrics(self.font())
+        return metrics.horizontalAdvance(info.get("label", "")) + metrics.horizontalAdvance(str(info.get("count", 0))) + 50
 
     def _recount(self) -> None:
         self._pinned = self._regular = self._chips_w = 0
@@ -2789,17 +3088,42 @@ class TabBar(QTabBar):
             info = self.provider(i)
             r = self.tabRect(i)
             if info.get("kind") == "chip":
-                rr = QRectF(r).adjusted(3, 9, -3, -9) if self.pill else QRectF(r).adjusted(3, 8, -3, -6)
+                rr = QRectF(r).adjusted(3, 6, -3, -6)
                 path = QPainterPath()
-                path.addRoundedRect(rr, rr.height() / 2 if self.pill else 8, rr.height() / 2 if self.pill else 8)
-                p.fillPath(path, QColor(info["color"]))
+                path.addRoundedRect(rr, rr.height() / 2, rr.height() / 2)
+                color = QColor(info["color"])
+                tint = QColor(color)
+                tint.setAlpha(48)
+                border = QColor(color)
+                border.setAlpha(140)
+                p.fillPath(path, tint)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(border, 1))
+                p.drawPath(path)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(color)
+                p.drawEllipse(QRectF(rr.left() + 8, rr.center().y() - 3.5, 7, 7))
                 p.setPen(QColor(info["fg"]))
                 f = p.font()
-                f.setPixelSize(12)
+                f.setPixelSize(11)
                 f.setBold(True)
                 p.setFont(f)
-                p.drawText(rr, Qt.AlignmentFlag.AlignCenter, p.fontMetrics().elidedText(
-                    info["label"], Qt.TextElideMode.ElideRight, int(rr.width()) - 6))
+                label_rect = rr.adjusted(20, 0, -24, 0)
+                p.drawText(label_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                           p.fontMetrics().elidedText(info["label"], Qt.TextElideMode.ElideRight,
+                                                      max(10, int(label_rect.width()))))
+                count_rect = QRectF(rr.right() - 21, rr.center().y() - 8, 16, 16)
+                count_bg = QColor(color)
+                count_bg.setAlpha(70)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(count_bg)
+                p.drawEllipse(count_rect)
+                p.setPen(QColor(info["fg"]))
+                count_font = p.font()
+                count_font.setPixelSize(9)
+                count_font.setBold(True)
+                p.setFont(count_font)
+                p.drawText(count_rect, Qt.AlignmentFlag.AlignCenter, str(info.get("count", "")))
                 continue
             if info.get("color"):
                 bar = QPainterPath()
@@ -2843,128 +3167,6 @@ class TabBar(QTabBar):
             self.newTabRequested.emit()
         else:
             super().mouseDoubleClickEvent(e)
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  Split view (dwindle tiling)
-# ═════════════════════════════════════════════════════════════════════════════
-
-class PaneFrame(QFrame):
-    closeRequested = pyqtSignal(object)
-    rotateRequested = pyqtSignal(object)
-
-    def __init__(self, view: "WebView", win: "MainWindow"):
-        super().__init__()
-        self.setObjectName("pane")
-        self.view = view
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.setSpacing(0)
-        head = QWidget()
-        head.setFixedHeight(28)
-        hl = QHBoxLayout(head)
-        hl.setContentsMargins(10, 0, 4, 0)
-        hl.setSpacing(2)
-        self.title = QLabel(view.page_title or "New tab")
-        self.title.setObjectName("panetitle")
-        hl.addWidget(self.title, 1)
-        for icon, tip, sig in (("rotate", "Rotate this split", self.rotateRequested),
-                               ("close", "Remove from split view", self.closeRequested)):
-            b = QToolButton()
-            b.setFixedSize(22, 22)
-            b.setIconSize(QSize(14, 14))
-            b.setIcon(win.ic(icon))
-            b.setToolTip(tip)
-            b.clicked.connect(lambda _=False, s=sig: s.emit(self.view))
-            hl.addWidget(b)
-        lay.addWidget(head)
-        lay.addWidget(view, 1)
-        self.set_focused(False)
-
-    def set_focused(self, on: bool) -> None:
-        self.setProperty("focused", on)
-        self.style().unpolish(self)
-        self.style().polish(self)
-
-
-class SplitHost(QWidget):
-    def __init__(self, win: "MainWindow"):
-        super().__init__()
-        self.win = win
-        self.lay = QVBoxLayout(self)
-        self.lay.setContentsMargins(6, 4, 6, 6)
-        self.root_widget: QWidget | None = None
-        self.frames: dict = {}
-        self.splitters: dict = {}
-
-    def detach_all(self) -> None:
-        for view, fr in self.frames.items():
-            fr.layout().removeWidget(view)
-            self.win.stack.addWidget(view)
-        self.frames, self.splitters = {}, {}
-        if self.root_widget is not None:
-            self.lay.removeWidget(self.root_widget)
-            self.root_widget.deleteLater()
-            self.root_widget = None
-
-    def build(self, tree: DwindleTree) -> None:
-        self.detach_all()
-        if tree.root is None:
-            return
-        self.root_widget = self._make(tree.root)
-        self.lay.addWidget(self.root_widget)
-
-    def _make(self, node) -> QWidget:
-        if node.leaf:
-            if self.win.stack.indexOf(node.item) >= 0:
-                self.win.stack.removeWidget(node.item)
-            fr = PaneFrame(node.item, self.win)
-            fr.closeRequested.connect(self.win.split_remove)
-            fr.rotateRequested.connect(self.win.split_rotate)
-            self.frames[node.item] = fr
-            return fr
-        sp = QSplitter(Qt.Orientation.Horizontal if node.dir == "h" else Qt.Orientation.Vertical)
-        sp.setChildrenCollapsible(False)
-        sp.setHandleWidth(8)
-        sp.addWidget(self._make(node.a))
-        sp.addWidget(self._make(node.b))
-        sp.setSizes([int(1000 * node.ratio), int(1000 * (1 - node.ratio))])
-        sp.splitterMoved.connect(lambda *_a, n=node, s=sp: self._moved(n, s))
-        self.splitters[id(node)] = sp
-        return sp
-
-    @staticmethod
-    def _moved(node, sp: QSplitter) -> None:
-        a, b = sp.sizes()
-        if a + b > 0:
-            node.ratio = min(0.9, max(0.1, a / (a + b)))
-
-    def set_focus(self, view) -> None:
-        for v, fr in self.frames.items():
-            fr.set_focused(v is view)
-
-    def refresh_titles(self) -> None:
-        for v, fr in self.frames.items():
-            fr.title.setText(v.page_title or "New tab")
-
-    def animate_in(self, node) -> None:
-        sp = self.splitters.get(id(node))
-        if sp is None:
-            return
-        ratio = node.ratio
-        anim = QVariantAnimation(sp)
-        anim.setDuration(240)
-        anim.setStartValue(0.0)
-        anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-
-        def step(t) -> None:
-            total = 1000
-            b = int(total * (1 - ratio) * float(t))
-            sp.setSizes([total - b, max(1, b)])
-        anim.valueChanged.connect(step)
-        anim.start()
-        sp._anim = anim
 
 
 class AddressBar(QLineEdit):
@@ -3302,14 +3504,6 @@ class WorkPanel(_Panel):
         row.addWidget(self.button("Group this tab", win.group_current))
         self.lay.addLayout(row)
 
-        self.section("Split view")
-        self.split_label = self.note("")
-        row = QHBoxLayout()
-        row.addWidget(self.button("Add pane", win.split_new))
-        row.addWidget(self.button("Rotate", win.split_rotate_current))
-        row.addWidget(self.button("Close split", win.split_close))
-        self.lay.addLayout(row)
-
         self.section("Saved workspaces")
         self.spaces = QListWidget()
         self.spaces.setMinimumHeight(110)
@@ -3348,9 +3542,6 @@ class WorkPanel(_Panel):
             it = QListWidgetItem(QIcon(pm), f"{g['name'] or 'Unnamed'}   ({n})")
             it.setData(Qt.ItemDataRole.UserRole, gid)
             self.groups.addItem(it)
-        panes = win.split_tree.items() if win.split_tree else []
-        self.split_label.setText(f"{len(panes)} panes side by side. Each new pane splits the one you're in."
-                                 if len(panes) > 1 else "Not split. Use Ctrl+\\ to open a new tab beside this one.")
         self.spaces.clear()
         for w in win.store["workspaces"]:
             self.spaces.addItem(f"{w['name']}   ({len(w['tabs'])} tabs)")
@@ -3489,6 +3680,156 @@ class WebPanels(QWidget):
         self.activate()
 
 
+SIDEBAR_PANEL_INFO = {
+    "perf": ("gauge", "Memory and performance", "Memory"),
+    "work": ("layers", "Tab groups and workspaces", "Workspace"),
+    "notes": ("note", "Notes", "Notes"),
+    "web": ("panel", "Web panels", "Web panels"),
+    "music": ("music", "YouTube Music player", "Music"),
+    "ai": ("spark", "AI companion", "AI companion"),
+}
+
+
+class SidebarCustomizeDialog(QDialog):
+    """Choose which sidebar panels are shown and the order of their buttons."""
+
+    def __init__(self, order: list[str], enabled: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Customize sidebar")
+        self.setMinimumWidth(360)
+        self.setMinimumHeight(390)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 18)
+        lay.setSpacing(10)
+        title = QLabel("Sidebar panels")
+        title.setObjectName("h2")
+        lay.addWidget(title)
+        hint = QLabel("Select the panels you want and arrange them with the arrows.")
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        self.items = QListWidget()
+        self.items.setDragDropMode(QListWidget.DragDropMode.InternalMove)
+        self.items.setDefaultDropAction(Qt.DropAction.MoveAction)
+        for key in order:
+            if key not in SIDEBAR_PANEL_INFO:
+                continue
+            _icon, tip, label = SIDEBAR_PANEL_INFO[key]
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, key)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsDragEnabled | Qt.ItemFlag.ItemIsDropEnabled)
+            item.setCheckState(Qt.CheckState.Checked if key in enabled else Qt.CheckState.Unchecked)
+            item.setToolTip(tip)
+            self.items.addItem(item)
+        lay.addWidget(self.items, 1)
+        moves = QHBoxLayout()
+        self.up = QPushButton("Move up")
+        self.down = QPushButton("Move down")
+        self.up.clicked.connect(lambda: self._move(-1))
+        self.down.clicked.connect(lambda: self._move(1))
+        moves.addWidget(self.up)
+        moves.addWidget(self.down)
+        moves.addStretch(1)
+        lay.addLayout(moves)
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton("Cancel")
+        apply = QPushButton("Apply")
+        apply.setProperty("primary", True)
+        cancel.clicked.connect(self.reject)
+        apply.clicked.connect(self._accept_if_valid)
+        actions.addWidget(cancel)
+        actions.addWidget(apply)
+        lay.addLayout(actions)
+
+    def _move(self, direction: int) -> None:
+        row = self.items.currentRow()
+        target = row + direction
+        if row < 0 or not 0 <= target < self.items.count():
+            return
+        item = self.items.takeItem(row)
+        self.items.insertItem(target, item)
+        self.items.setCurrentRow(target)
+
+    def _accept_if_valid(self) -> None:
+        if not any(self.items.item(i).checkState() == Qt.CheckState.Checked for i in range(self.items.count())):
+            QMessageBox.information(self, "Keep one panel", "Choose at least one sidebar panel.")
+            return
+        self.accept()
+
+    def values(self) -> tuple[list[str], list[str]]:
+        order, enabled = [], []
+        for i in range(self.items.count()):
+            item = self.items.item(i)
+            key = item.data(Qt.ItemDataRole.UserRole)
+            order.append(key)
+            if item.checkState() == Qt.CheckState.Checked:
+                enabled.append(key)
+        return order, enabled
+
+
+class AICompanionPanel(QWidget):
+    PROVIDERS = (
+        ("anthropic", "Claude", "https://claude.ai/new"),
+        ("gemini", "Gemini", "https://gemini.google.com/app"),
+        ("chatgpt", "ChatGPT", "https://chatgpt.com/"),
+    )
+
+    def __init__(self, win: "MainWindow"):
+        super().__init__()
+        self.win = win
+        self.loaded_provider = None
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 12, 10, 10)
+        lay.setSpacing(8)
+        head = QHBoxLayout()
+        self.provider = QComboBox()
+        for key, label, _url in self.PROVIDERS:
+            self.provider.addItem(label, key)
+        saved = win.store["ai_provider"]
+        idx = self.provider.findData(saved)
+        self.provider.setCurrentIndex(idx if idx >= 0 else 2)
+        title = QLabel("AI companion")
+        title.setObjectName("h2")
+        lay.addWidget(title)
+        head.addWidget(self.provider, 1)
+        for text, tip, fn in (("↻", "Reload AI companion", self.reload),
+                              ("↗", "Open AI companion in a tab", self.open_tab)):
+            button = QToolButton()
+            button.setText(text)
+            button.setToolTip(tip)
+            button.setFixedSize(30, 30)
+            button.clicked.connect(fn)
+            head.addWidget(button)
+        lay.addLayout(head)
+        self.view = QWebEngineView()
+        self.view.setPage(WebPage(win.ctx, win, self.view))
+        lay.addWidget(self.view, 1)
+        self.provider.currentIndexChanged.connect(self._provider_changed)
+        self.activate()
+
+    def _current(self):
+        return next((item for item in self.PROVIDERS if item[0] == self.provider.currentData()), self.PROVIDERS[-1])
+
+    def activate(self) -> None:
+        key, _label, url = self._current()
+        if key != self.loaded_provider:
+            self.loaded_provider = key
+            self.view.load(QUrl(url))
+
+    def _provider_changed(self, _index: int) -> None:
+        key, _label, url = self._current()
+        self.win.store.set("ai_provider", key)
+        self.loaded_provider = key
+        self.view.load(QUrl(url))
+
+    def reload(self) -> None:
+        self.view.reload()
+
+    def open_tab(self) -> None:
+        self.win.open_url(self._current()[2])
+
+
 class Sidebar(QWidget):
     PANEL_W = 322
 
@@ -3504,22 +3845,30 @@ class Sidebar(QWidget):
         self.rail.setObjectName("rail")
         self.rail.setFixedWidth(46)
         rl = QVBoxLayout(self.rail)
+        self.rail_layout = rl
         rl.setContentsMargins(5, 8, 5, 8)
         rl.setSpacing(4)
         self._icons: list = []
-        self.toggle_btn = self._rail_button("sidebar", "Show or hide the sidebar (Ctrl+B)", self.toggle)
+        self.toggle_btn = self._rail_button("sidebar", "Hide the sidebar (Ctrl+B)", self.toggle)
         rl.addWidget(self.toggle_btn)
         rl.addSpacing(6)
         self.buttons: dict[str, QToolButton] = {}
         self.panels: dict[str, QWidget] = {}
-        for key, icon, tip in (("perf", "gauge", "Memory and performance"), ("work", "layers", "Tab groups, split view, workspaces"),
-                               ("notes", "note", "Notes"), ("web", "panel", "Web panels"),
-                               ("music", "music", "YouTube Music player")):
+        self.order = [k for k in win.store["sidebar_order"] if k in SIDEBAR_PANEL_INFO]
+        self.order += [k for k in SIDEBAR_PANEL_INFO if k not in self.order]
+        self.enabled = {k for k in win.store["sidebar_panels"] if k in SIDEBAR_PANEL_INFO}
+        if not self.enabled:
+            self.enabled = set(self.order)
+        for key in self.order:
+            icon, tip, _label = SIDEBAR_PANEL_INFO[key]
             b = self._rail_button(icon, tip, lambda k=key: self.show_panel(k))
             b.setCheckable(True)
             rl.addWidget(b)
             self.buttons[key] = b
         rl.addStretch(1)
+        self.customize_btn = self._rail_button("spark", "Customize sidebar", self.customize)
+        rl.addWidget(self.customize_btn)
+        self.rail.setVisible(False)
         h.addWidget(self.rail)
 
         self.panel = QWidget()
@@ -3531,19 +3880,20 @@ class Sidebar(QWidget):
         pl.addWidget(self.stack)
         self.perf, self.work, self.notes, self.web = PerfPanel(win), WorkPanel(win), NotesPanel(win), WebPanels(win)
         self.music = MusicPanel(win)
+        self.ai = AICompanionPanel(win)
         for key, w in (("perf", self.perf), ("work", self.work), ("notes", self.notes), ("web", self.web),
-                       ("music", self.music)):
+                       ("music", self.music), ("ai", self.ai)):
             self.panels[key] = w
             self.stack.addWidget(w)
         h.addWidget(self.panel)
-        self.current = win.store["sidebar_panel"] if win.store["sidebar_panel"] in self.panels else "perf"
+        self.current = win.store["sidebar_panel"] if win.store["sidebar_panel"] in self.enabled else next(iter(self.enabled))
         self.stack.setCurrentWidget(self.panels[self.current])
         self._anim = QPropertyAnimation(self.panel, b"maximumWidth", self)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._anim.setDuration(220)
         self._anim.finished.connect(self._anim_done)
         self.refresh_icons()
-        self._mark()
+        self._apply_buttons()
 
     def _rail_button(self, icon: str, tip: str, fn) -> QToolButton:
         b = QToolButton()
@@ -3556,10 +3906,35 @@ class Sidebar(QWidget):
         return b
 
     def refresh_icons(self) -> None:
+        icon_color = resolve_theme(self.win.store)["sub"]
         for b, icon in self._icons:
-            b.setIcon(self.win.ic(icon))
+            b.setIcon(self.win.ic(icon, icon_color))
         self.web.refresh_icons()
         self.music.refresh_icons()
+
+    def _apply_buttons(self) -> None:
+        for key, button in self.buttons.items():
+            self.rail_layout.removeWidget(button)
+            button.setVisible(key in self.enabled)
+        for index, key in enumerate(self.order, start=2):
+            if key in self.buttons:
+                self.rail_layout.insertWidget(index, self.buttons[key])
+        self._mark()
+
+    def customize(self) -> None:
+        dlg = SidebarCustomizeDialog(self.order, list(self.enabled), self.win)
+        if not dlg.exec():
+            return
+        self.order, enabled = dlg.values()
+        self.enabled = set(enabled)
+        self.win.store.set("sidebar_order", self.order)
+        self.win.store.set("sidebar_panels", [k for k in self.order if k in self.enabled])
+        if self.current not in self.enabled:
+            self.current = next(k for k in self.order if k in self.enabled)
+            self.stack.setCurrentWidget(self.panels[self.current])
+        self._apply_buttons()
+        if self.is_open:
+            self._on_show()
 
     def _mark(self) -> None:
         for k, b in self.buttons.items():
@@ -3571,11 +3946,15 @@ class Sidebar(QWidget):
     def set_open(self, on: bool, animate: bool = True) -> None:
         if on == self.is_open:
             return
+        if not on and self.win.store["sidebar_always_visible"]:
+            return
         self.is_open = on
         self.win.store.set("sidebar_open", on)
+        self.win.update_sidebar_reveal()
         self._anim.stop()
+        self.panel.setMinimumWidth(0)
         if on:
-            self.panel.setMinimumWidth(0)
+            self.rail.setVisible(True)
             self._on_show()
         if animate and self.win.anim_on():
             self._anim.setStartValue(self.panel.maximumWidth())
@@ -3588,8 +3967,12 @@ class Sidebar(QWidget):
 
     def _anim_done(self) -> None:
         self.panel.setMinimumWidth(self.PANEL_W if self.is_open else 0)
+        self.rail.setVisible(self.is_open)
+        self.win.update_sidebar_reveal()
 
     def show_panel(self, key: str) -> None:
+        if key not in self.enabled:
+            return
         if self.is_open and key == self.current:
             self.set_open(False)
             return
@@ -3608,8 +3991,10 @@ class Sidebar(QWidget):
             self.web.activate()
         elif self.current == "music":
             self.music.activate()
-        else:
-            w.refresh() if hasattr(w, "refresh") else None
+        elif self.current == "ai":
+            self.ai.activate()
+        elif hasattr(w, "refresh"):
+            w.refresh()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -3755,7 +4140,8 @@ class MiniPlayer(QFrame):
 
     def refresh_visibility(self) -> None:
         w = self.win
-        on = bool(w.store["mini_player"]) and w.sidebar.music.view is not None and w.edition() != "legacy"
+        on = (bool(w.store["mini_player"]) and w.sidebar.music.view is not None and w.edition() != "legacy"
+              and not (w._focus_mode or w._fs))
         self.setVisible(on)
         if on:
             self.refresh_icons()
@@ -3766,6 +4152,384 @@ class MiniPlayer(QFrame):
         if p is not None:
             self.move(16, max(8, p.height() - self.height() - 46))
             self.raise_()
+
+
+class SiteNotificationPopup(QFrame):
+    """A small browser notification with the WebEngine click and close callbacks."""
+
+    def __init__(self, parent: QWidget, notification: QWebEngineNotification, on_done, animate: bool = True):
+        super().__init__(parent)
+        self.notification = notification
+        self.on_done = on_done
+        self._animate = bool(animate)
+        self._finishing = False
+        self.setObjectName("siteNotification")
+        self.setFixedSize(356, 112)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._opacity = QGraphicsOpacityEffect(self)
+        self._opacity.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity)
+        self._show_anim = QPropertyAnimation(self._opacity, b"opacity", self)
+        self._show_anim.setDuration(160)
+        self._show_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(14, 12, 12, 12)
+        row.setSpacing(10)
+        icon = QLabel()
+        icon.setFixedSize(32, 32)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        image = notification.icon()
+        if not image.isNull():
+            icon.setPixmap(QPixmap.fromImage(image).scaled(30, 30, Qt.AspectRatioMode.KeepAspectRatio,
+                                                          Qt.TransformationMode.SmoothTransformation))
+        row.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+        text_column = QVBoxLayout()
+        text_column.setSpacing(2)
+        title = QLabel(notification.title() or notification.origin().host() or "Website notification")
+        title.setObjectName("notificationTitle")
+        title.setWordWrap(False)
+        title.setMaximumWidth(250)
+        message = QLabel(notification.message())
+        message.setObjectName("notificationMessage")
+        message.setWordWrap(True)
+        message.setMaximumHeight(45)
+        origin = QLabel(notification.origin().host())
+        origin.setObjectName("notificationOrigin")
+        for label in (title, message, origin):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        text_column.addWidget(title)
+        text_column.addWidget(message)
+        text_column.addWidget(origin)
+        row.addLayout(text_column, 1)
+        close = QToolButton()
+        close.setText("×")
+        close.setFixedSize(26, 26)
+        close.setToolTip("Dismiss notification")
+        close.clicked.connect(self.dismiss)
+        row.addWidget(close, 0, Qt.AlignmentFlag.AlignTop)
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(9000)
+        self.timer.timeout.connect(self.dismiss)
+        notification.closed.connect(self._closed_by_site)
+
+    def show_notification(self) -> None:
+        self._opacity.setOpacity(0.0 if self._animate else 1.0)
+        self.show()
+        self.raise_()
+        if self._animate:
+            self._show_anim.setStartValue(0.0)
+            self._show_anim.setEndValue(1.0)
+            self._show_anim.start()
+        self.notification.show()
+        self.timer.start()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.notification.click()
+            self.dismiss()
+        super().mouseReleaseEvent(event)
+
+    def _closed_by_site(self) -> None:
+        if self._finishing:
+            return
+        self._finishing = True
+        self.timer.stop()
+        self.hide()
+        self.on_done(self)
+        self.deleteLater()
+
+    def dismiss(self) -> None:
+        if self._finishing:
+            return
+        self._finishing = True
+        self.timer.stop()
+        self.notification.close()
+        self.hide()
+        self.on_done(self)
+        self.deleteLater()
+
+
+class DownloadsPopup(QFrame):
+    """A compact, live download list anchored to the browser's top-right corner."""
+
+    def __init__(self, win: "MainWindow"):
+        super().__init__(win.centralWidget())
+        self.win = win
+        self.auto_hide = False
+        self.dismissed_active = False
+        self.setObjectName("downloadPopup")
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setFixedWidth(372)
+        self.setMaximumHeight(440)
+        self._opacity = QGraphicsOpacityEffect(self)
+        self._opacity.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity)
+        self._show_anim = QPropertyAnimation(self._opacity, b"opacity", self)
+        self._show_anim.setDuration(150)
+        self._show_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._render_signature = None
+        self._rows_by_id: dict[str, QFrame] = {}
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self._hide_if_idle)
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.setInterval(1000)
+        self.refresh_timer.timeout.connect(self.refresh)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 14)
+        lay.setSpacing(8)
+        head = QHBoxLayout()
+        title = QLabel("Downloads")
+        title.setObjectName("downloadTitle")
+        head.addWidget(title, 1)
+        self.clear_btn = QToolButton()
+        self.clear_btn.setText("Clear")
+        self.clear_btn.setToolTip("Clear completed downloads")
+        self.clear_btn.clicked.connect(self.clear_completed)
+        head.addWidget(self.clear_btn)
+        self.all_btn = QToolButton()
+        self.all_btn.setText("All downloads")
+        self.all_btn.clicked.connect(self.open_all)
+        head.addWidget(self.all_btn)
+        self.close_btn = QToolButton()
+        self.close_btn.setText("×")
+        self.close_btn.setFixedSize(28, 28)
+        self.close_btn.setToolTip("Close downloads")
+        self.close_btn.clicked.connect(self.toggle)
+        head.addWidget(self.close_btn)
+        lay.addLayout(head)
+        self.empty = QLabel("No downloads yet")
+        self.empty.setObjectName("downloadEmpty")
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self.empty)
+        self.scroll = QScrollArea()
+        self.scroll.setObjectName("downloadScroll")
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setMinimumHeight(0)
+        self.scroll.viewport().setAutoFillBackground(False)
+        self.rows = QWidget()
+        self.rows.setObjectName("downloadRows")
+        self.rows_layout = QVBoxLayout(self.rows)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(7)
+        self.scroll.setWidget(self.rows)
+        lay.addWidget(self.scroll)
+        self.setMinimumHeight(0)
+        self.scroll.hide()
+        self.refresh()
+        self.hide()
+
+    @staticmethod
+    def _size(value: float) -> str:
+        units = ("B", "KB", "MB", "GB", "TB")
+        value = max(0.0, float(value or 0))
+        index = 0
+        while value >= 1024 and index < len(units) - 1:
+            value /= 1024
+            index += 1
+        return f"{value:.1f} {units[index]}" if index else f"{int(value)} B"
+
+    @staticmethod
+    def _duration(value: float) -> str:
+        seconds = max(0, int(value or 0))
+        return f"{seconds // 60}m {seconds % 60:02d}s" if seconds >= 60 else f"{seconds}s"
+
+    def refresh(self) -> None:
+        all_records = sorted(self.win.ctx.downloads.records(), key=lambda row: row.get("time", 0), reverse=True)
+        records = all_records[:8]
+        completed = any(row.get("state") != "progress" for row in all_records)
+        self.clear_btn.setVisible(completed)
+        self.clear_btn.setEnabled(completed)
+        self.empty.setVisible(not records)
+        self.scroll.setVisible(bool(records))
+        signature = tuple((row.get("id", ""), row.get("state", "failed")) for row in records)
+        if signature != self._render_signature:
+            while self.rows_layout.count():
+                item = self.rows_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            self._rows_by_id.clear()
+            for record in records:
+                row = self._row(record)
+                self._rows_by_id[record.get("id", "")] = row
+                self.rows_layout.addWidget(row)
+            self.rows_layout.addStretch(1)
+            self._render_signature = signature
+        else:
+            for record in records:
+                row = self._rows_by_id.get(record.get("id", ""))
+                if row is not None:
+                    self._update_row(row, record)
+        self.adjustSize()
+        self.reposition()
+        if self.isVisible() and any(r.get("state") == "progress" for r in all_records):
+            self.refresh_timer.start()
+        elif not any(r.get("state") == "progress" for r in all_records):
+            self.refresh_timer.stop()
+
+    def _row(self, record: dict) -> QWidget:
+        card = QFrame()
+        card.setObjectName("downloadCard")
+        card._download_state = record.get("state", "failed")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(11, 9, 11, 9)
+        lay.setSpacing(5)
+        name = QLabel()
+        name.setObjectName("downloadName")
+        name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        name.setWordWrap(False)
+        name.setMinimumWidth(0)
+        card._name_label = name
+        lay.addWidget(name)
+        details = QLabel()
+        details.setObjectName("muted")
+        card._details_label = details
+        lay.addWidget(details)
+        card._progress_bar = None
+        if card._download_state == "progress":
+            progress = QProgressBar()
+            progress.setObjectName("downloadProgress")
+            progress.setTextVisible(False)
+            progress.setMaximumHeight(5)
+            card._progress_bar = progress
+            lay.addWidget(progress)
+        actions = QWidget(card)
+        actions.setObjectName("downloadActions")
+        action_row = QHBoxLayout(actions)
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(4)
+        action_row.addStretch(1)
+        uid = record.get("id", "")
+        state = card._download_state
+        if state == "progress":
+            cancel = QToolButton()
+            cancel.setText("Cancel")
+            cancel.clicked.connect(lambda _=False, i=uid: self.win.ctx.downloads.cancel(i))
+            action_row.addWidget(cancel)
+        elif state == "done" and record.get("exists"):
+            open_file = QToolButton()
+            open_file.setText("Open")
+            open_file.clicked.connect(lambda _=False, i=uid: self.open_file(i))
+            folder = QToolButton()
+            folder.setText("Show in folder")
+            folder.clicked.connect(lambda _=False, i=uid: self.show_folder(i))
+            action_row.addWidget(open_file)
+            action_row.addWidget(folder)
+        else:
+            remove = QToolButton()
+            remove.setText("Remove")
+            remove.clicked.connect(lambda _=False, i=uid: self.remove_record(i))
+            action_row.addWidget(remove)
+        lay.addWidget(actions)
+        self._update_row(card, record)
+        return card
+
+    def _update_row(self, card: QFrame, record: dict) -> None:
+        full_name = record.get("name") or "Download"
+        card._name_label.setText(QFontMetrics(card._name_label.font()).elidedText(
+            full_name, Qt.TextElideMode.ElideMiddle, max(120, self.width() - 68)))
+        card._name_label.setToolTip(full_name)
+        state = record.get("state", "failed")
+        received, total = record.get("received", 0), record.get("total", 0)
+        if state == "progress":
+            meta = self._size(received)
+            if total:
+                meta += f" of {self._size(total)}"
+            meta += f"  ·  {self._size(record.get('speed', 0))}/s  ·  {self._duration(record.get('elapsed', 0))}"
+        elif state == "done":
+            meta = f"Downloaded  ·  {self._size(total or received)}"
+        elif state == "cancelled":
+            meta = "Cancelled"
+        else:
+            meta = "Download failed"
+        card._details_label.setText(meta)
+        progress = card._progress_bar
+        if progress is not None:
+            if total:
+                progress.setRange(0, 100)
+                progress.setValue(min(100, int(received * 100 / total)))
+            else:
+                progress.setRange(0, 0)
+
+    def open_file(self, uid: str) -> None:
+        record = self.win.ctx.downloads.find(uid)
+        if record and os.path.exists(record.get("path", "")):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(record["path"]))
+
+    def show_folder(self, uid: str) -> None:
+        record = self.win.ctx.downloads.find(uid)
+        if record:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.dirname(record["path"])))
+
+    def clear_completed(self) -> None:
+        for record in self.win.ctx.downloads.records():
+            if record.get("state") != "progress":
+                self.win.ctx.downloads.remove(record["id"])
+        self.refresh()
+
+    def remove_record(self, uid: str) -> None:
+        self.win.ctx.downloads.remove(uid)
+        self.refresh()
+
+    def reposition(self) -> None:
+        parent = self.parentWidget()
+        if parent:
+            self.setMaximumHeight(min(440, max(120, parent.height() - 106)))
+            self.adjustSize()
+            self.move(max(8, parent.width() - self.width() - 12), 94)
+
+    def _present(self) -> None:
+        self.show()
+        self.raise_()
+        self._opacity.setOpacity(0.0 if self.win.anim_on() else 1.0)
+        if self.win.anim_on():
+            self._show_anim.stop()
+            self._show_anim.setStartValue(0.0)
+            self._show_anim.setEndValue(1.0)
+            self._show_anim.start()
+
+    def toggle(self) -> None:
+        self.hide_timer.stop()
+        if self.isVisible():
+            self.dismissed_active = any(r.get("state") == "progress" for r in self.win.ctx.downloads.records())
+            self.refresh_timer.stop()
+            self.hide()
+            return
+        self.auto_hide = False
+        self.dismissed_active = False
+        self.refresh()
+        self.reposition()
+        self._present()
+        if any(r.get("state") == "progress" for r in self.win.ctx.downloads.records()):
+            self.refresh_timer.start()
+
+    def show_for_activity(self) -> None:
+        self.auto_hide = True
+        self.hide_timer.stop()
+        self.refresh()
+        self.reposition()
+        self._present()
+        self.refresh_timer.start()
+
+    def open_all(self) -> None:
+        self.hide_timer.stop()
+        self.refresh_timer.stop()
+        self.dismissed_active = any(r.get("state") == "progress" for r in self.win.ctx.downloads.records())
+        self.hide()
+        self.auto_hide = False
+        self.win.open_internal("downloads")
+
+    def _hide_if_idle(self) -> None:
+        active = any(r.get("state") == "progress" for r in self.win.ctx.downloads.records())
+        if self.auto_hide and not active:
+            self.hide()
+            self.refresh_timer.stop()
+            self.auto_hide = False
+            self.dismissed_active = False
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -4369,6 +5133,246 @@ st.textContent='html{background:__BG__}body{margin:0;color:__FG__;font:19px/1.75
 document.head.appendChild(st);window.scrollTo(0,0)})();"""
 
 
+class WallpaperLayer(QWidget):
+    """A click-through wallpaper surface behind the whole browser window."""
+
+    VIDEO_SUFFIXES = {".mp4", ".webm", ".m4v", ".mov", ".ogv"}
+
+    def __init__(self, store: ProfileStore, parent: QWidget):
+        super().__init__(parent)
+        self.store = store
+        self._cache_key = ""
+        self._pixmap = QPixmap()
+        self._previous = QPixmap()
+        self._fade = 1.0
+        self._scaled: dict[tuple[int, int, int], QPixmap] = {}
+        self._movie = None
+        self._video = None
+        self._video_dim = None
+        self._player = None
+        self._audio = None
+        self._blur = None
+        self.setObjectName("wallpaperLayer")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAutoFillBackground(False)
+        self._animation = QVariantAnimation(self)
+        self._animation.setDuration(220)
+        self._animation.setStartValue(0.0)
+        self._animation.setEndValue(1.0)
+        self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._animation.valueChanged.connect(self._fade_changed)
+        self.set_wallpaper(animate=False)
+
+    def _fade_changed(self, value) -> None:
+        self._fade = float(value)
+        self.update()
+
+    @staticmethod
+    def _pixmap_from_svg(data: bytes) -> QPixmap:
+        renderer = QSvgRenderer(QByteArray(data))
+        if not renderer.isValid():
+            return QPixmap()
+        pixmap = QPixmap(1920, 1080)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        renderer.render(painter, QRectF(pixmap.rect()))
+        painter.end()
+        return pixmap
+
+    def _fallback_pixmap(self) -> QPixmap:
+        data = theme_wallpaper_svg(self.store["theme"])
+        if data:
+            return self._pixmap_from_svg(data)
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(QColor(THEMES.get(self.store["theme"], THEMES["dark"])["bg"]))
+        return pixmap
+
+    def _load_pixmap(self, value: str) -> QPixmap:
+        if value == "auto":
+            data = theme_wallpaper_svg(self.store["theme"])
+            return self._pixmap_from_svg(data) if data else QPixmap()
+        if value.startswith("theme:"):
+            data = theme_wallpaper_svg(value[6:])
+            return self._pixmap_from_svg(data) if data else QPixmap()
+        if value.startswith("user:"):
+            name = os.path.basename(value[5:])
+            if name not in self.store["user_wallpapers"]:
+                return QPixmap()
+            path = self.store.dir / "wallpapers" / name
+            if path.suffix.lower() == ".svg":
+                try:
+                    return self._pixmap_from_svg(path.read_bytes())
+                except OSError:
+                    return QPixmap()
+            return QPixmap(str(path))
+        data = wallpaper_svg(value)
+        return self._pixmap_from_svg(data) if data else QPixmap()
+
+    def _stop_media(self) -> None:
+        if self._movie is not None:
+            self._movie.stop()
+            self._movie.deleteLater()
+            self._movie = None
+        if self._player is not None:
+            self._player.stop()
+            self._player.deleteLater()
+            self._player = None
+            self._audio = None
+        if self._video is not None:
+            self._video.hide()
+
+    def _start_media(self, path: Path) -> bool:
+        suffix = path.suffix.lower()
+        if suffix == ".gif":
+            movie = QMovie(str(path))
+            movie.setCacheMode(QMovie.CacheMode.CacheAll)
+            if not movie.isValid():
+                return False
+            movie.frameChanged.connect(lambda: self._movie_frame(movie))
+            self._movie = movie
+            movie.start()
+            return True
+        if suffix not in self.VIDEO_SUFFIXES or QMediaPlayer is None:
+            return False
+        if self._video is None:
+            self._video = QVideoWidget(self)
+            self._video.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._video.setGeometry(self.rect())
+            if hasattr(self._video, "setAspectRatioMode"):
+                self._video.setAspectRatioMode(Qt.AspectRatioMode.KeepAspectRatioByExpanding)
+            self._video_dim = QWidget(self._video)
+            self._video_dim.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._video_dim.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            self._video_dim.setGeometry(self._video.rect())
+            self._video_dim.raise_()
+        audio = QAudioOutput(self)
+        audio.setVolume(0.0)
+        player = QMediaPlayer(self)
+        player.setAudioOutput(audio)
+        player.setVideoOutput(self._video)
+        if hasattr(player, "setLoops"):
+            player.setLoops(QMediaPlayer.Loops.Infinite)
+        player.setSource(QUrl.fromLocalFile(str(path)))
+        self._audio, self._player = audio, player
+        self._video.show()
+        self._video.lower()
+        player.play()
+        return True
+
+    def _movie_frame(self, movie) -> None:
+        if movie is self._movie:
+            self._pixmap = movie.currentPixmap()
+            self._scaled.clear()
+            self.update()
+
+    def set_wallpaper(self, animate: bool = True) -> None:
+        value = self.store["wallpaper"]
+        key = value + (":" + self.store["theme"] if value == "auto" else "")
+        if key == self._cache_key:
+            self.update_effects()
+            return
+        self._animation.stop()
+        self._stop_media()
+        self._previous = self._pixmap
+        self._cache_key = key
+        self._pixmap = self._load_pixmap(value)
+        if self._pixmap.isNull():
+            self._pixmap = self._fallback_pixmap()
+        if value.startswith("user:"):
+            path = self.store.dir / "wallpapers" / os.path.basename(value[5:])
+            if path.is_file():
+                self._start_media(path)
+        self._scaled.clear()
+        self._fade = 0.0 if animate and not self._previous.isNull() else 1.0
+        if self._fade == 0.0:
+            self._animation.start()
+        else:
+            self._previous = QPixmap()
+        self.update_effects()
+        self.update()
+
+    def update_effects(self) -> None:
+        blur = max(0, min(24, int(self.store["wallpaper_blur"])))
+        dim = max(0, min(80, int(self.store["wallpaper_dim"])))
+        if self._video_dim is not None:
+            self._video_dim.setStyleSheet(f"background: rgba(0, 0, 0, {dim / 100:.2f});")
+            self._video_dim.setGeometry(self._video.rect())
+            self._video_dim.raise_()
+        if blur and self._blur is None:
+            self._blur = QGraphicsBlurEffect(self)
+            self._blur.setBlurHints(QGraphicsBlurEffect.BlurHint.PerformanceHint)
+            self.setGraphicsEffect(self._blur)
+        if self._blur is not None:
+            self._blur.setBlurRadius(blur)
+            if not blur:
+                self.setGraphicsEffect(None)
+                self._blur.deleteLater()
+                self._blur = None
+        self.update()
+
+    def resizeEvent(self, event) -> None:
+        if self._video is not None:
+            self._video.setGeometry(self.rect())
+            if self._video_dim is not None:
+                self._video_dim.setGeometry(self._video.rect())
+                self._video_dim.raise_()
+        self._scaled.clear()
+        super().resizeEvent(event)
+
+    def _scaled_pixmap(self, pixmap: QPixmap) -> QPixmap:
+        if pixmap.isNull() or self.width() <= 0 or self.height() <= 0:
+            return QPixmap()
+        key = (self.width(), self.height(), hash(pixmap.cacheKey()))
+        if key not in self._scaled:
+            self._scaled[key] = pixmap.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                              Qt.TransformationMode.SmoothTransformation)
+        return self._scaled[key]
+
+    def paintEvent(self, _event) -> None:
+        if self._player is not None and self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        for pixmap, opacity in ((self._previous, 1.0 - self._fade), (self._pixmap, self._fade)):
+            if pixmap.isNull() or opacity <= 0:
+                continue
+            scaled = self._scaled_pixmap(pixmap)
+            x = (self.width() - scaled.width()) // 2
+            y = (self.height() - scaled.height()) // 2
+            painter.setOpacity(opacity)
+            painter.drawPixmap(x, y, scaled)
+        painter.setOpacity(1.0)
+        dim = max(0, min(80, int(self.store["wallpaper_dim"])))
+        if dim:
+            painter.fillRect(self.rect(), QColor(0, 0, 0, round(dim * 2.55)))
+        painter.end()
+
+
+class SidebarHoverZone(QWidget):
+    hoverChanged = pyqtSignal(bool)
+
+    def enterEvent(self, event) -> None:
+        self.hoverChanged.emit(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.hoverChanged.emit(False)
+        super().leaveEvent(event)
+
+
+class SidebarRevealButton(QToolButton):
+    hoverChanged = pyqtSignal(bool)
+
+    def enterEvent(self, event) -> None:
+        self.hoverChanged.emit(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.hoverChanged.emit(False)
+        super().leaveEvent(event)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  Main window
 # ═════════════════════════════════════════════════════════════════════════════
@@ -4381,6 +5385,9 @@ class MainWindow(QMainWindow):
         self._icon_cache: dict = {}
         self._icon_buttons: list = []
         self._printer = None
+        self._print_view = None
+        self._print_loop = None
+        self._print_result = None
         self._fs = False
         self._focus_mode = False
         self._was_max = False
@@ -4391,34 +5398,34 @@ class MainWindow(QMainWindow):
         self._moving = False
         self._key_seq = 0
         self._anchor = None
-        self._anim_node = None
-        self._pane_lock = False
         self._palette = None
         self._popup = None
+        self._site_notifications: list[SiteNotificationPopup] = []
         self.tab_items: list = []                 # WebView or ChipItem, same order as the tab bar
         self.groups: dict[str, dict] = {}
         self.selected: set = set()
-        self.split_tree: DwindleTree | None = None
-        self.split_shown = False
         self._current: WebView | None = None
         self.setWindowIcon(app.logo_icon)
         self.resize(1320, 860)
         self.setMinimumSize(640, 420)
         self._build_ui()
+        self.download_popup = DownloadsPopup(self)
         self._build_shortcuts()
         ctx.downloads.finishedItem.connect(self._download_done)
+        ctx.downloads.changed.connect(self._downloads_changed)
         app.governor.updated.connect(self.sidebar.perf.on_update)
-        QApplication.instance().focusChanged.connect(self._focus_changed)
         self.apply_theme()
         self.refresh_bookmarks_bar()
         self.refresh_extension_button()
-        if store["sidebar_open"]:
+        if store["sidebar_open"] or store["sidebar_always_visible"]:
             self.sidebar.set_open(True, animate=False)
 
     def _build_ui(self) -> None:
         root = QWidget()
         root.setObjectName("root")
         self.setCentralWidget(root)
+        self.wallpaper_layer = WallpaperLayer(self.store, root)
+        self.wallpaper_layer.setGeometry(root.rect())
         lay = QVBoxLayout(root)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -4437,6 +5444,7 @@ class MainWindow(QMainWindow):
         sl.setContentsMargins(10, 4, 10, 0)
         sl.setSpacing(4)
         self.tabbar = TabBar()
+        self.tabbar.setObjectName("tabs")
         self.tabbar.provider = self.tab_info
         sl.addWidget(self.tabbar, 0, Qt.AlignmentFlag.AlignBottom)
         self.plus = self.tool_button("plus", "New tab (Ctrl+T)", self.new_tab, 30)
@@ -4448,7 +5456,7 @@ class MainWindow(QMainWindow):
         sb.setSpacing(4)
         self.sel_label = QLabel("")
         sb.addWidget(self.sel_label)
-        for text, fn in (("Group", self.group_selected), ("Split view", self.split_selected), ("Close", self.close_selected)):
+        for text, fn in (("Group", self.group_selected), ("Close", self.close_selected)):
             b = QPushButton(text)
             b.clicked.connect(lambda _=False, f=fn: f())
             sb.addWidget(b)
@@ -4480,6 +5488,7 @@ class MainWindow(QMainWindow):
             tl.addWidget(b)
         tl.addSpacing(6)
         self.address = AddressBar()
+        self.address.setObjectName("address")
         self.sec_action = self.address.addAction(self.ic("globe"), QLineEdit.ActionPosition.LeadingPosition)
         self.star_action = self.address.addAction(self.ic("star"), QLineEdit.ActionPosition.TrailingPosition)
         self.star_action.setToolTip("Bookmark this page (Ctrl+D)")
@@ -4495,16 +5504,16 @@ class MainWindow(QMainWindow):
         self.address.setCompleter(self.completer)
         tl.addWidget(self.address, 1)
         tl.addSpacing(6)
-        self.split_btn = self.tool_button("split", "Split view: open a tab beside this one (Ctrl+\\)", self.split_new)
         self.ext_btn = self.tool_button("puzzle", "Extensions", self.show_extensions_menu)
-        self.dl_btn = self.tool_button("download", "Downloads (Ctrl+J)", lambda: self.open_internal("downloads"))
+        self.dl_btn = self.tool_button("download", "Downloads", self.toggle_downloads_popup)
+        self.settings_btn = self.tool_button("settings", "Settings (Ctrl+,)", lambda: self.open_internal("settings"))
         self.profile_btn = QToolButton()
         self.profile_btn.setFixedSize(34, 34)
         self.profile_btn.setIconSize(QSize(26, 26))
         self.profile_btn.setToolTip("Profiles")
         self.profile_btn.clicked.connect(self.show_profile_menu)
         self.menu_btn = self.tool_button("menu", "Menu", self.show_main_menu)
-        for b in (self.split_btn, self.ext_btn, self.dl_btn, self.profile_btn, self.menu_btn):
+        for b in (self.ext_btn, self.dl_btn, self.settings_btn, self.profile_btn, self.menu_btn):
             tl.addWidget(b)
         cl.addWidget(self.toolbar)
 
@@ -4524,22 +5533,47 @@ class MainWindow(QMainWindow):
 
         # sidebar + web content
         body = QWidget()
+        body.setObjectName("browserBody")
         bl = QHBoxLayout(body)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(0)
         self.viewhost = QWidget()
+        self.viewhost.setObjectName("viewhost")
         vl = QVBoxLayout(self.viewhost)
         vl.setContentsMargins(0, 0, 0, 0)
         self.content = ContentArea()
-        self.stack = QStackedWidget()                 # every tab view that isn't inside the split
-        self.split_host = SplitHost(self)
+        self.stack = QStackedWidget()
         self.content.addWidget(self.stack)
-        self.content.addWidget(self.split_host)
         vl.addWidget(self.content)
         self.sidebar = Sidebar(self)
         bl.addWidget(self.sidebar)
         bl.addWidget(self.viewhost, 1)
         lay.addWidget(body, 1)
+        self.sidebar_hover_zone = SidebarHoverZone(self.viewhost)
+        self.sidebar_hover_zone.setObjectName("sidebarHoverZone")
+        self.sidebar_hover_zone.setFixedSize(12, 126)
+        self.sidebar_hover_zone.setMouseTracking(True)
+        self.sidebar_hover_zone.hoverChanged.connect(self._sidebar_hover_changed)
+        self.sidebar_reveal = SidebarRevealButton(self.viewhost)
+        self.sidebar_reveal.setObjectName("sidebarReveal")
+        self.sidebar_reveal.setFixedSize(34, 64)
+        self.sidebar_reveal.setIconSize(QSize(18, 18))
+        self.sidebar_reveal.setIcon(self.ic("sidebar"))
+        self.sidebar_reveal.setToolTip("Open sidebar (Ctrl+B)")
+        self.sidebar_reveal.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sidebar_reveal.clicked.connect(lambda _=False: self.sidebar.toggle())
+        self.sidebar_reveal.hoverChanged.connect(self._sidebar_hover_changed)
+        self.sidebar_hide_timer = QTimer(self)
+        self.sidebar_hide_timer.setSingleShot(True)
+        self.sidebar_hide_timer.setInterval(420)
+        self.sidebar_hide_timer.timeout.connect(self._hide_sidebar_reveal)
+        self.sidebar_reveal_animation = QPropertyAnimation(self.sidebar_reveal, b"pos", self)
+        self.sidebar_reveal_animation.setDuration(160)
+        self.sidebar_reveal_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._icon_buttons.append((self.sidebar_reveal, "sidebar"))
+        self.sidebar_hover_zone.raise_()
+        self.sidebar_reveal.raise_()
+        self.update_sidebar_reveal()
         self.link_label = QLabel(self.viewhost)
         self.link_label.setObjectName("overlay")
         self.link_label.hide()
@@ -4577,6 +5611,7 @@ class MainWindow(QMainWindow):
         fl.addWidget(self.tool_button("close", "Close (Esc)", self.close_find, 30))
         lay.addWidget(self.findbar)
         self.findbar.hide()
+        self.wallpaper_layer.lower()
         QShortcut(QKeySequence("Esc"), self.findbar, activated=self.close_find,
                   context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
         QShortcut(QKeySequence("Shift+Return"), self.find_input, activated=lambda: self.do_find(False),
@@ -4610,6 +5645,18 @@ class MainWindow(QMainWindow):
         b.clicked.connect(lambda: slot())
         self._icon_buttons.append((b, icon))
         return b
+
+    def tab_close_button(self, view: WebView) -> QToolButton:
+        button = QToolButton()
+        button.setObjectName("tabclose")
+        button.setFixedSize(20, 20)
+        button.setIconSize(QSize(14, 14))
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        button.setAutoRaise(True)
+        button.setIcon(self.ic("close", self.theme()["sub"]))
+        button.setToolTip("Close tab")
+        button.clicked.connect(lambda _=False, v=view: self.close_tab(self.index_of(v)))
+        return button
 
     def _build_shortcuts(self) -> None:
         def sc(seq, fn):
@@ -4659,15 +5706,11 @@ class MainWindow(QMainWindow):
         for s in ("Ctrl+K", "Ctrl+Shift+P"):
             sc(s, self.open_palette)
         sc("Ctrl+B", self.sidebar.toggle)
-        sc("Ctrl+\\", self.split_new)
-        sc("Ctrl+Shift+\\", self.split_close)
         sc("Ctrl+Shift+G", self.group_current)
         sc("Ctrl+Alt+R", self.reader_mode)
-        sc("Ctrl+Shift+F", self.toggle_focus)
+        sc("Ctrl+Shift+F", self.toggle_zen)
+        sc("Ctrl+Shift+Z", self.toggle_zen)
         sc("Ctrl+Shift+S", self.screenshot)
-        for key, d in (("Left", "left"), ("Right", "right"), ("Up", "up"), ("Down", "down")):
-            sc(f"Ctrl+Alt+{key}", lambda d=d: self.split_focus_dir(d))
-            sc(f"Ctrl+Alt+Shift+{key}", lambda d=d: self.split_swap_dir(d))
         self.esc_fullscreen = QShortcut(QKeySequence("Esc"), self, activated=self._leave_hidden_chrome)
         self.esc_fullscreen.setEnabled(False)
 
@@ -4691,12 +5734,14 @@ class MainWindow(QMainWindow):
         self.strip.setFixedHeight(46 if stable else 40)
         self.toolbar.setFixedHeight(54 if stable else 48)
         self.address.setFixedHeight(40 if stable else 34)
-        self.split_btn.setVisible(not legacy)
         self.refresh_extension_button()
         self.sidebar.setVisible(not legacy and not (self._fs or self._focus_mode))
+        self.update_sidebar_reveal()
         self.mini.refresh_icons()
         self.mini.refresh_visibility()
         self.tabbar.relayout()
+        if self._fs or self._focus_mode:
+            self._apply_chrome_visibility()
 
     def apply_theme(self) -> None:
         t = resolve_theme(self.store)
@@ -4719,11 +5764,10 @@ class MainWindow(QMainWindow):
         if self._palette is not None:
             self._palette.deleteLater()
             self._palette = None
-        if self.split_shown:
-            self.split_render()
         self.apply_edition()
         self.update_toolbar()
         self.refresh_bookmarks_bar()
+        self.wallpaper_layer.set_wallpaper()
 
     def theme(self) -> dict:
         return resolve_theme(self.store)
@@ -4736,7 +5780,7 @@ class MainWindow(QMainWindow):
         self.profile_btn.setIcon(QIcon(avatar_pixmap(self.store["avatar_emoji"] or self.store["name"], self.store["color"], 28, img)))
         tip = self.store["name"] + (f"\n{self.store['description']}" if self.store["description"] else "")
         self.profile_btn.setToolTip(tip)
-        self.home_btn.setVisible(bool(self.store["show_home_button"]))
+        self.home_btn.setVisible(bool(self.store["show_home_button"]) and not self._focus_mode and not self._fs)
 
     def on_setting_changed(self, key: str, sender) -> None:
         if key in ("theme", "accent"):
@@ -4758,6 +5802,12 @@ class MainWindow(QMainWindow):
             self.ctx.apply_scroll()
         elif key == "keep_cookies":
             self.toast("Restart AwesomeBrowse 2 to apply the cookie change")
+        elif key in ("wallpaper", "wallpaper_dim", "wallpaper_blur"):
+            self.wallpaper_layer.set_wallpaper()
+        elif key == "sidebar_always_visible":
+            if self.store[key]:
+                self.sidebar.set_open(True)
+            self.update_sidebar_reveal()
 
     def current_view(self) -> WebView | None:
         return self._current
@@ -4772,7 +5822,7 @@ class MainWindow(QMainWindow):
         return -1
 
     def is_visible_view(self, v) -> bool:
-        return v is self._current or bool(self.split_shown and self.split_tree and v in self.split_tree)
+        return v is self._current
 
     def view_at(self, i: int):
         x = self.tab_items[i] if 0 <= i < len(self.tab_items) else None
@@ -4791,6 +5841,7 @@ class MainWindow(QMainWindow):
         view.loadStarted.connect(lambda v=view: self._load_started(v))
         view.loadProgress.connect(lambda p, v=view: self._load_progress(v, p))
         view.loadFinished.connect(lambda ok, v=view: self._load_finished(v, ok))
+        view.printRequested.connect(self.print_page)
         page.linkHovered.connect(self.show_link)
         page.fullScreenRequested.connect(self._html_fullscreen)
         page.windowCloseRequested.connect(lambda v=view: self.close_tab(self.index_of(v)))
@@ -4823,13 +5874,7 @@ class MainWindow(QMainWindow):
             self.tabbar.factors[view.key] = 0.03
         self.tabbar.insertTab(idx, self.app.logo_icon, "New tab")
         self.tabbar.setTabData(idx, {"key": view.key, "pinned": False, "chip": None})
-        btn = QToolButton()
-        btn.setObjectName("tabclose")
-        btn.setFixedSize(18, 18)
-        btn.setIconSize(QSize(12, 12))
-        btn.setIcon(self.ic("close", self.theme()["sub"]))
-        btn.setToolTip("Close tab")
-        btn.clicked.connect(lambda _=False, v=view: self.close_tab(self.index_of(v)))
+        btn = self.tab_close_button(view)
         self.tabbar.setTabButton(idx, QTabBar.ButtonPosition.RightSide, btn)
         self._moving = False
         if pinned:
@@ -4897,12 +5942,6 @@ class MainWindow(QMainWindow):
             del self.closed_tabs[:-20]
         if self._dev_target is view:
             self.devdock.hide()
-        if self.split_tree is not None and view in self.split_tree:
-            self.split_tree.remove(view)
-            if len(self.split_tree) <= 1:
-                self.split_close()
-            elif self.split_shown:
-                self.split_render()
         if self._current is view:
             self._current = None
         self._moving = True
@@ -4975,18 +6014,10 @@ class MainWindow(QMainWindow):
                     return
 
     def show_view(self, view: WebView, strong: bool = False) -> None:
-        if self.split_tree is not None and view in self.split_tree:
-            if not self.split_shown:
-                self.split_render()
-            self._focus_pane(view)
-            self.content.setCurrentWidget(self.split_host)
-        else:
-            if self.split_shown:
-                self.split_suspend()
-            if self.stack.indexOf(view) < 0:
-                self.stack.addWidget(view)
-            self.stack.setCurrentWidget(view)
-            self.content.setCurrentWidget(self.stack)
+        if self.stack.indexOf(view) < 0:
+            self.stack.addWidget(view)
+        self.stack.setCurrentWidget(view)
+        self.content.setCurrentWidget(self.stack)
         if self.anim_on():
             self.content.flash(0.96 if strong else 0.5, 280 if strong else 200)
 
@@ -5030,12 +6061,7 @@ class MainWindow(QMainWindow):
                 old.hide()
                 old.deleteLater()
         else:
-            btn = QToolButton()
-            btn.setObjectName("tabclose")
-            btn.setFixedSize(18, 18)
-            btn.setIconSize(QSize(12, 12))
-            btn.setIcon(self.ic("close", self.theme()["sub"]))
-            btn.clicked.connect(lambda _=False, v=view: self.close_tab(self.index_of(v)))
+            btn = self.tab_close_button(view)
             self.tabbar.setTabButton(i, QTabBar.ButtonPosition.RightSide, btn)
         others = sum(1 for x in self.tab_items if isinstance(x, WebView) and x.pinned and x is not view)
         dest = others if pinned else others
@@ -5068,8 +6094,6 @@ class MainWindow(QMainWindow):
             title = "New tab"
         view.page_title = title or view.url().host() or "New tab"
         self._refresh_tab_label(view)
-        if self.split_shown:
-            self.split_host.refresh_titles()
         if view is self._current:
             self.update_window_title()
 
@@ -5156,9 +6180,12 @@ class MainWindow(QMainWindow):
         else:
             self.sec_action.setIcon(self.ic("globe"))
             self.sec_action.setToolTip("")
+        if self._focus_mode and not self._fs:
+            self.sec_action.setIcon(self.app.logo_icon)
+            self.sec_action.setToolTip("AwesomeBrowse Zen")
         marked = self.is_bookmarked(url.toString())
         self.star_action.setIcon(self.ic("star_on", resolve_theme(self.store)["accent"]) if marked else self.ic("star"))
-        self.star_action.setVisible(scheme in ("http", "https", "file"))
+        self.star_action.setVisible(not self._focus_mode and scheme in ("http", "https", "file"))
 
     # ── navigation ──────────────────────────────────────────────────────────
     def focus_address(self) -> None:
@@ -5248,8 +6275,9 @@ class MainWindow(QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
         marks = self.store["bookmarks"]
-        self.bmbar.setVisible(bool(self.store["show_bookmarks_bar"]))
-        if not self.store["show_bookmarks_bar"]:
+        show_bar = bool(self.store["show_bookmarks_bar"]) and not self._focus_mode and not self._fs
+        self.bmbar.setVisible(show_bar)
+        if not show_bar:
             return
         avail = max(200, self.width() - 80)
         used, overflow = 0, []
@@ -5363,13 +6391,10 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         add_action(m, "Command palette\u2026", self.open_palette, "Ctrl+K")
         add_action(m, "Sidebar", self.sidebar.toggle, "Ctrl+B", checkable=True, checked=self.sidebar.is_open)
-        ws = style_popup(m.addMenu("Tabs and split view"))
+        add_action(m, "Customize sidebar\u2026", self.sidebar.customize)
+        ws = style_popup(m.addMenu("Tabs and workspaces"))
         add_action(ws, "Group this tab\u2026", self.group_current, "Ctrl+Shift+G")
         add_action(ws, "Group selected tabs\u2026", self.group_selected, enabled=len(self.selected) >= 2)
-        ws.addSeparator()
-        add_action(ws, "Split with a new tab", self.split_new, "Ctrl+\\")
-        add_action(ws, "Rotate this split", self.split_rotate_current, enabled=self.split_tree is not None)
-        add_action(ws, "Close split view", self.split_close, "Ctrl+Shift+\\", enabled=self.split_tree is not None)
         ws.addSeparator()
         add_action(ws, "Save workspace\u2026", self.save_workspace)
         add_action(m, "Extensions", lambda: self.open_internal("extensions"))
@@ -5391,7 +6416,7 @@ class MainWindow(QMainWindow):
         add_action(m, "Save page as\u2026", self.save_page, "Ctrl+S")
         tools = style_popup(m.addMenu("More tools"))
         add_action(tools, "Reader mode", self.reader_mode, "Ctrl+Alt+R")
-        add_action(tools, "Focus mode", self.toggle_focus, "Ctrl+Shift+F")
+        add_action(tools, "Zen mode", self.toggle_zen, "Ctrl+Shift+Z")
         add_action(tools, "Take screenshot", self.screenshot, "Ctrl+Shift+S")
         add_action(tools, "Copy link without tracking", self.copy_clean_url)
         tools.addSeparator()
@@ -5434,8 +6459,6 @@ class MainWindow(QMainWindow):
             add_action(m, "Rename or recolor group\u2026", lambda: self.edit_group(gid))
             add_action(m, "Expand group" if g.get("collapsed") else "Collapse group", lambda: self.toggle_collapse(gid))
             add_action(m, "New tab in group", lambda: self.add_tab(None, group=gid))
-            add_action(m, "Open group in split view", lambda: self.split_views(self.group_views(gid)),
-                       enabled=len(self.group_views(gid)) > 1)
             add_action(m, "Copy all addresses", lambda: self._copy("\n".join(v.url().toString() for v in self.group_views(gid)),
                                                                      "Copied the group's addresses"))
             m.addSeparator()
@@ -5458,7 +6481,6 @@ class MainWindow(QMainWindow):
             m.addSeparator()
             if len(self.selected) >= 2 and v in self.selected:
                 add_action(m, f"Group {len(self.selected)} selected tabs\u2026", self.group_selected)
-                add_action(m, "Open selected tabs in split view", self.split_selected)
             else:
                 sub = style_popup(m.addMenu("Add to group"))
                 for gid, g in self.groups.items():
@@ -5469,27 +6491,12 @@ class MainWindow(QMainWindow):
                 add_action(sub, "New group\u2026", lambda: self._group_dialog([v]), enabled=not v.pinned)
                 if v.group:
                     add_action(m, "Remove from group", lambda: self.remove_from_group(v))
-            if self.split_tree is not None and v in self.split_tree:
-                add_action(m, "Remove from split view", lambda: self.split_remove(v))
-            elif self.split_tree is not None:
-                add_action(m, "Add to split view", lambda: self._add_to_split(v))
-            else:
-                add_action(m, "Split with a new tab", lambda: (self.select_view(v), self.split_new()))
             m.addSeparator()
             add_action(m, "Close tab", lambda: self.close_tab(self.index_of(v)))
             add_action(m, "Close other tabs", lambda: self._close_others(v))
             add_action(m, "Close tabs to the right", lambda: self._close_right(v))
         add_action(m, "Reopen closed tab", self.reopen_tab, "Ctrl+Shift+T", enabled=bool(self.closed_tabs))
         m.exec(self.tabbar.mapToGlobal(pos))
-
-    def _add_to_split(self, v: WebView) -> None:
-        if self.split_tree is None or v in self.split_tree:
-            return
-        target = self._focused_pane if self._focused_pane in self.split_tree else self.split_tree.items()[-1]
-        self._anim_node = self.split_tree.add(v, target, self.content.width() or 1000, self.content.height() or 700)
-        if self.split_shown:
-            self.split_render()
-        self.tabbar.setCurrentIndex(self.index_of(v))
 
     def _close_others(self, keep: WebView) -> None:
         for v in self.tab_views():
@@ -5528,7 +6535,6 @@ class MainWindow(QMainWindow):
             add_action(m, "Open link in new window", lambda: self.app.open_window(self.store, urls=[link.toString()]))
             add_action(m, "Open link in private window",
                        lambda: self.app.open_window(self.store, private=True, urls=[link.toString()]))
-            add_action(m, "Open link in split view", lambda: self.split_new(link.toString()))
             add_action(m, "Copy link address", lambda: QApplication.clipboard().setText(link.toString()))
             add_action(m, "Copy link without tracking", lambda: self._copy(strip_tracking(link.toString()), "Copied clean link"))
             add_action(m, "Save link as\u2026", trig(WA.DownloadLinkToDisk))
@@ -5595,13 +6601,12 @@ class MainWindow(QMainWindow):
         if isinstance(item, ChipItem):
             g = self.groups.get(item.gid, {})
             n = sum(1 for v in self.tab_views() if v.group == item.gid)
-            label = (g.get("name") or "Group") + (f" ({n})" if g.get("collapsed") else "")
+            label = g.get("name") or "Group"
             col = g.get("color", "#8ab4f8")
-            return {"kind": "chip", "color": col, "fg": _on_color(col), "label": label}
+            return {"kind": "chip", "color": col, "fg": t["text"], "label": label, "count": n}
         if isinstance(item, WebView):
             col = self.groups[item.group]["color"] if item.group in self.groups else None
-            in_split = bool(self.split_tree is not None and item in self.split_tree)
-            return {"kind": "tab", "color": col or (t["accent"] if in_split else None),
+            return {"kind": "tab", "color": col,
                     "selected": item in self.selected, "accent": t["accent"]}
         return {}
 
@@ -5896,141 +6901,6 @@ class MainWindow(QMainWindow):
         for v in views:
             self.close_tab(self.index_of(v))
 
-    # ── split view (dwindle tiling) ─────────────────────────────────────────
-    def _focus_pane(self, view) -> None:
-        self._focused_pane = view
-        self.split_host.set_focus(view)
-
-    def _focus_changed(self, _old, new) -> None:
-        if not self.split_shown or new is None:
-            return
-        try:
-            for v, fr in self.split_host.frames.items():
-                if fr is new or fr.isAncestorOf(new):
-                    if v is not self._current and not self._pane_lock:
-                        i = self.index_of(v)
-                        if i >= 0:
-                            self.tabbar.setCurrentIndex(i)
-                    return
-        except RuntimeError:
-            pass
-
-    def split_render(self) -> None:
-        if self.split_tree is None:
-            return
-        for v in self.split_tree.items():
-            if v.sleeping:
-                self.wake_view(v)
-            if v.pending_url:
-                url, v.pending_url = v.pending_url, None
-                v.load(QUrl(url))
-        self.split_host.build(self.split_tree)
-        self.split_shown = True
-        self.split_host.refresh_titles()
-        if self._current is not None and self._current in self.split_tree:
-            self._focus_pane(self._current)
-        node, self._anim_node = self._anim_node, None
-        if node is not None and self.anim_on():
-            QTimer.singleShot(0, lambda n=node: self.split_host.animate_in(n))
-        self.tabbar.update()
-        self.sidebar.work.refresh()
-
-    def split_suspend(self) -> None:
-        self.split_host.detach_all()
-        self.split_shown = False
-
-    def split_close(self) -> None:
-        if self.split_tree is None:
-            return
-        self.split_host.detach_all()
-        self.split_shown = False
-        self.split_tree = None
-        self._focused_pane = None
-        if self._current is not None:
-            self.show_view(self._current)
-        self.tabbar.update()
-        self.sidebar.work.refresh()
-
-    def split_new(self, url=None) -> None:
-        base = self._current
-        if base is None:
-            return
-        w, h = self.content.width(), self.content.height()
-        if self.split_tree is not None and base not in self.split_tree:
-            self.split_close()
-        new = self.add_tab(url, background=True, after_current=True)
-        if self.split_tree is None:
-            self.split_tree = DwindleTree()
-            self.split_tree.add(base)
-        target = self._focused_pane if (self._focused_pane is not None and self._focused_pane in self.split_tree) else base
-        self._anim_node = self.split_tree.add(new, target, w or 1000, h or 700)
-        if self.split_shown:
-            self.split_render()
-        self.tabbar.setCurrentIndex(self.index_of(new))
-
-    def split_views(self, views: list) -> None:
-        views = [v for v in views if v is not None]
-        if len(views) < 2:
-            self.toast("Select at least two tabs to split")
-            return
-        self.split_close()
-        tree = DwindleTree()
-        w, h = self.content.width() or 1000, self.content.height() or 700
-        tree.add(views[0])
-        for prev, v in zip(views, views[1:]):
-            tree.add(v, prev, w, h)
-        self.split_tree = tree
-        self._show_split_starting_at(views[0] if self._current not in tree else self._current)
-
-    def _show_split_starting_at(self, view: WebView) -> None:
-        if view is self._current:
-            self.show_view(view)
-        else:
-            self.tabbar.setCurrentIndex(self.index_of(view))
-
-    def split_selected(self) -> None:
-        views = [v for v in self.tab_views() if v in self.selected]
-        self.clear_selection()
-        self.split_views(views)
-
-    def split_remove(self, view) -> None:
-        if self.split_tree is None or view not in self.split_tree:
-            return
-        self.split_tree.remove(view)
-        if len(self.split_tree) <= 1:
-            self.split_close()
-            return
-        self.split_render()
-        if self._current is view or self._current not in self.split_tree:
-            self.tabbar.setCurrentIndex(self.index_of(self.split_tree.items()[0]))
-
-    def split_rotate(self, view) -> None:
-        if self.split_tree is not None and view in self.split_tree:
-            self.split_tree.rotate(view)
-            self.split_render()
-
-    def split_rotate_current(self) -> None:
-        v = self._focused_pane or self._current
-        if v is not None:
-            self.split_rotate(v)
-
-    def _split_neighbor(self, direction: str):
-        if not self.split_shown or self.split_tree is None or self._current not in self.split_tree:
-            return None
-        return self.split_tree.neighbor(self._current, direction, self.content.width() or 1000, self.content.height() or 700)
-
-    def split_focus_dir(self, direction: str) -> None:
-        nb = self._split_neighbor(direction)
-        if nb is not None:
-            self.tabbar.setCurrentIndex(self.index_of(nb))
-            nb.setFocus()
-
-    def split_swap_dir(self, direction: str) -> None:
-        nb = self._split_neighbor(direction)
-        if nb is not None:
-            self.split_tree.swap(self._current, nb)
-            self.split_render()
-
     # ── sleeping tabs ───────────────────────────────────────────────────────
     def can_sleep(self, v: WebView, aggressive: bool = False) -> bool:
         try:
@@ -6098,19 +6968,17 @@ class MainWindow(QMainWindow):
 
     # ── sessions and workspaces ─────────────────────────────────────────────
     def snapshot(self) -> dict:
-        tabs, idx = [], {}
+        tabs = []
         for v in self.tab_views():
             url = v.pending_url or (v.sleep_url.toString() if v.sleeping and v.sleep_url else v.url().toString())
             if not url or url.rstrip("/") == NEWTAB or url == "about:blank":
                 continue
-            idx[v] = len(tabs)
             tabs.append({"url": url, "title": v.page_title, "pinned": v.pinned, "group": v.group})
         used = {t["group"] for t in tabs if t["group"]}
         groups = {g: dict(self.groups[g]) for g in used if g in self.groups}
-        split = self.split_tree.to_data(lambda v: idx.get(v)) if self.split_tree is not None else None
-        return {"tabs": tabs, "groups": groups, "split": split}
+        return {"tabs": tabs, "groups": groups}
 
-    def restore_tabs(self, items: list, groups: dict, split=None, lazy: bool = True) -> list:
+    def restore_tabs(self, items: list, groups: dict, lazy: bool = True) -> list:
         views, gmap = [], {}
         for it in items:
             if not isinstance(it, dict) or not it.get("url"):
@@ -6133,11 +7001,6 @@ class MainWindow(QMainWindow):
             if g.get("collapsed") and gid in gmap:
                 self.groups[gmap[gid]]["collapsed"] = True
                 self._apply_collapse(gmap[gid])
-        if split:
-            tree = DwindleTree.from_data(split, lambda t: views[t] if isinstance(t, int) and 0 <= t < len(views) else None)
-            if tree.root is not None and len(tree) > 1:
-                self.split_close()
-                self.split_tree = tree
         return views
 
     def restore_session(self, session: list, groups: dict) -> None:
@@ -6165,13 +7028,10 @@ class MainWindow(QMainWindow):
         if not (0 <= r < len(self.store["workspaces"])):
             return
         w = self.store["workspaces"][r]
-        views = self.restore_tabs(w["tabs"], w.get("groups", {}), w.get("split"), lazy=True)
+        views = self.restore_tabs(w["tabs"], w.get("groups", {}), lazy=True)
         first = next((v for v in views if v is not None), None)
         if first is not None:
-            if self.split_tree is not None and first in self.split_tree:
-                self._show_split_starting_at(first)
-            else:
-                self.tabbar.setCurrentIndex(self.index_of(first))
+            self.tabbar.setCurrentIndex(self.index_of(first))
         self.toast(f"Opened \u201c{w['name']}\u201d")
 
     def delete_workspace(self, r: int) -> None:
@@ -6187,6 +7047,9 @@ class MainWindow(QMainWindow):
         self._palette.open_palette()
 
     def open_sidebar_panel(self, key: str) -> None:
+        if key not in self.sidebar.enabled:
+            self.sidebar.customize()
+            return
         if not (self.sidebar.is_open and self.sidebar.current == key):
             self.sidebar.show_panel(key)
 
@@ -6197,21 +7060,20 @@ class MainWindow(QMainWindow):
         cmds = [
             cmd("New tab", "Ctrl+T", self.new_tab), cmd("New window", "Ctrl+N", lambda: self.app.open_window(self.store)),
             cmd("New private window", "Ctrl+Shift+N", lambda: self.app.open_window(self.store, private=True), "incognito"),
-            cmd("Split with a new tab", "Ctrl+\\  tiles tabs side by side", self.split_new, "split view tile pane"),
-            cmd("Close split view", "Ctrl+Shift+\\", self.split_close, "unsplit"),
-            cmd("Rotate this split", "Switch between side by side and stacked", self.split_rotate_current),
             cmd("Group this tab", "Ctrl+Shift+G", self.group_current, "tab group collection"),
             cmd("Group selected tabs", "Ctrl+click tabs to select several", self.group_selected),
-            cmd("Save workspace", "Remember these tabs, groups and split", self.save_workspace, "session"),
+            cmd("Save workspace", "Remember these tabs and groups", self.save_workspace, "session"),
             cmd("Toggle sidebar", "Ctrl+B", self.sidebar.toggle),
+            cmd("Customize sidebar", "Choose panels and change their order", self.sidebar.customize),
             cmd("Memory and performance", "Sidebar. RAM limiter", lambda: self.open_sidebar_panel("perf"), "ram limit sleep"),
             cmd("Free memory now", "Sleep tabs you aren't using", lambda: self.sidebar.perf._free(), "ram"),
             cmd("Notes", "Sidebar scratchpad", lambda: self.open_sidebar_panel("notes")),
             cmd("Web panels", "Sidebar. Pinned sites", lambda: self.open_sidebar_panel("web")),
             cmd("Music player", "Sidebar. YouTube Music with a pinnable mini player", lambda: self.open_sidebar_panel("music"), "youtube song"),
-            cmd("Workspace panel", "Sidebar. Groups, split, workspaces", lambda: self.open_sidebar_panel("work")),
+            cmd("AI companion", "Choose Claude, Gemini or ChatGPT", lambda: self.open_sidebar_panel("ai"), "assistant chat"),
+            cmd("Workspace panel", "Sidebar. Groups and saved workspaces", lambda: self.open_sidebar_panel("work")),
             cmd("Reader mode", "Ctrl+Alt+R", self.reader_mode, "clean article"),
-            cmd("Focus mode", "Ctrl+Shift+F. Hide the toolbar", self.toggle_focus, "zen"),
+            cmd("Zen mode", "Ctrl+Shift+Z. Keep tabs and a full-width search bar", self.toggle_zen, "focus distraction free"),
             cmd("Take screenshot", "Ctrl+Shift+S. Saved and copied", self.screenshot),
             cmd("Copy link without tracking", "Strips utm_ and click IDs", self.copy_clean_url),
             cmd("Sleep this tab", "Free its memory", self.sleep_current_tab),
@@ -6293,7 +7155,8 @@ class MainWindow(QMainWindow):
 
     # ── extensions ──────────────────────────────────────────────────────────
     def refresh_extension_button(self) -> None:
-        self.ext_btn.setVisible(self.ctx.extensions is not None and self.edition() != "legacy")
+        self.ext_btn.setVisible(self.ctx.extensions is not None and self.edition() != "legacy"
+                                and not self._focus_mode and not self._fs)
 
     def show_extensions_menu(self) -> None:
         m = self.make_menu()
@@ -6386,8 +7249,46 @@ class MainWindow(QMainWindow):
         if not v:
             return
         self._printer = QPrinter(QPrinter.PrinterMode.HighResolution)
-        if QPrintDialog(self._printer, self).exec():
-            v.page().print(self._printer, lambda ok: self.toast("Sent to printer" if ok else "Printing failed"))
+        self._printer.setResolution(300)
+        self._printer.setDocName(v.page_title or "Web page")
+        self._print_view = v
+        preview = PrintPreviewDialog(self, self._printer, v.page_title or "Web page")
+        try:
+            preview.exec()
+        finally:
+            self._print_view = None
+            self._printer = None
+
+    def _print_document(self, printer) -> bool:
+        view = self._print_view
+        if not view:
+            return False
+        loop = QEventLoop(self)
+        self._print_loop = loop
+        self._print_result = None
+        view.printFinished.connect(self._print_finished)
+        view.print(printer)
+        if self._print_result is None:
+            loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        try:
+            view.printFinished.disconnect(self._print_finished)
+        except TypeError:
+            pass
+        result = self._print_result
+        self._print_loop = None
+        self._print_result = None
+        if result is False:
+            painter = QPainter()
+            if painter.begin(printer):
+                painter.drawText(QPointF(24, 40), "Could not generate the print preview.")
+                painter.end()
+            self.toast("Could not render the print preview")
+        return result is True
+
+    def _print_finished(self, success: bool) -> None:
+        self._print_result = bool(success)
+        if self._print_loop is not None:
+            self._print_loop.quit()
 
     def save_pdf(self) -> None:
         v = self.current_view()
@@ -6397,8 +7298,14 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Save as PDF", os.path.join(self.store["download_dir"], name),
                                               "PDF (*.pdf)")
         if path:
-            v.page().printToPdf(path)
-            self.toast("Saved PDF")
+            def finished(filename, ok):
+                try:
+                    v.pdfPrintingFinished.disconnect(finished)
+                except TypeError:
+                    pass
+                self.toast(f"Saved PDF: {os.path.basename(filename)}" if ok else "Saving PDF failed")
+            v.pdfPrintingFinished.connect(finished)
+            v.printToPdf(path)
 
     def save_page(self) -> None:
         v = self.current_view()
@@ -6420,6 +7327,48 @@ class MainWindow(QMainWindow):
         rec = self.ctx.downloads.find(uid)
         if rec and rec["state"] == "done":
             self.toast(f"Downloaded {rec['name']}")
+
+    def toggle_downloads_popup(self) -> None:
+        self.download_popup.toggle()
+
+    def _downloads_changed(self) -> None:
+        popup = self.download_popup
+        popup.refresh()
+        active = any(r.get("state") == "progress" for r in self.ctx.downloads.records())
+        if self._fs or self._focus_mode:
+            popup.dismissed_active = active
+            return
+        if active:
+            popup.hide_timer.stop()
+            if not popup.isVisible() and not popup.dismissed_active:
+                popup.show_for_activity()
+        else:
+            popup.dismissed_active = False
+            if popup.isVisible() and popup.auto_hide:
+                popup.hide_timer.start(3600)
+
+    def show_web_notification(self, notification: QWebEngineNotification) -> None:
+        popup = SiteNotificationPopup(self.centralWidget(), notification, self._remove_site_notification,
+                                      animate=self.anim_on())
+        self._site_notifications.append(popup)
+        popup.show_notification()
+        self._position_site_notifications()
+
+    def _remove_site_notification(self, popup: SiteNotificationPopup) -> None:
+        if popup in self._site_notifications:
+            self._site_notifications.remove(popup)
+        self._position_site_notifications()
+
+    def _position_site_notifications(self) -> None:
+        parent = self.centralWidget()
+        if parent is None:
+            return
+        visible = [n for n in self._site_notifications if n.isVisible()]
+        for index, popup in enumerate(visible):
+            x = max(12, parent.width() - popup.width() - 18)
+            y = max(12, parent.height() - popup.height() - 18 - index * (popup.height() + 10))
+            popup.move(x, y)
+            popup.raise_()
 
     # ── zoom ────────────────────────────────────────────────────────────────
     def zoom_set(self, factor: float) -> None:
@@ -6472,14 +7421,110 @@ class MainWindow(QMainWindow):
             self.toast("Press F11 or Esc to exit full screen")
 
     def _apply_chrome_visibility(self) -> None:
-        hidden = self._fs or self._focus_mode
+        zen = self._focus_mode and not self._fs
+        hidden = self._fs
+        self.setProperty("zenMode", zen)
         self.chrome.setVisible(not hidden)
-        self.sidebar.setVisible(not hidden and self.edition() != "legacy")
-        if hidden:
+        self.sidebar.setVisible(not hidden and not zen and self.edition() != "legacy")
+        self.strip.setProperty("zen", zen)
+        self.toolbar.setProperty("zen", zen)
+        self.tabbar.setProperty("zen", zen)
+        self.address.setProperty("zen", zen)
+        for widget in (self.strip, self.toolbar, self.tabbar, self.address):
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
+            widget.update()
+        self.tabbar.pill = zen or self.edition() == "stable"
+        self.tabbar.h = 36 if zen else (40 if self.edition() == "stable" else 36)
+        self.strip.setFixedHeight(44 if zen else (46 if self.edition() == "stable" else 40))
+        self.toolbar.setFixedHeight(66 if zen else (54 if self.edition() == "stable" else 48))
+        self.address.setFixedHeight(46 if zen else (40 if self.edition() == "stable" else 34))
+        self.toolbar.layout().setContentsMargins(20, 8, 20, 8) if zen else self.toolbar.layout().setContentsMargins(10, 0, 10, 0)
+        self.plus.setIcon(self.ic("plus", resolve_theme(self.store)["sub"]) if zen else self.ic("plus"))
+        self.bmbar.setVisible(not hidden and not zen and bool(self.store["show_bookmarks_bar"]))
+        for widget in (self.back_btn, self.fwd_btn, self.reload_btn, self.home_btn,
+                       self.ext_btn, self.dl_btn, self.profile_btn, self.menu_btn):
+            widget.setVisible(not zen)
+        if not zen:
+            self.home_btn.setVisible(bool(self.store["show_home_button"]))
+            self.refresh_extension_button()
+        self.star_action.setVisible(not zen and self.current_view() is not None and
+                                     self.current_view().url().scheme() in ("http", "https", "file"))
+        self.progress.setVisible(not zen)
+        self.update_sidebar_reveal()
+        if hidden or zen:
             self.findbar.hide()
+            self.mini.hide()
+            self.link_label.hide()
+            self.toast_label.hide()
+            if hasattr(self, "download_popup"):
+                self.download_popup.hide()
+                self.download_popup.refresh_timer.stop()
+                self.download_popup.dismissed_active = any(
+                    r.get("state") == "progress" for r in self.ctx.downloads.records())
+        if not hidden and not zen:
+            self.mini.refresh_visibility()
+            if hasattr(self, "download_popup"):
+                self.download_popup.dismissed_active = False
+                self._downloads_changed()
+        self.tabbar.relayout()
+        self.esc_fullscreen.setEnabled(hidden or zen)
+        if not hidden:
+            self.update_toolbar()
+
+    def update_sidebar_reveal(self) -> None:
+        if not hasattr(self, "sidebar_reveal") or not hasattr(self, "sidebar_hover_zone"):
+            return
+        enabled = (not self._fs and not self._focus_mode and self.edition() != "legacy"
+                   and not self.sidebar.is_open and not self.store["sidebar_always_visible"])
+        zone_h = min(136, max(40, self.viewhost.height() - 24))
+        self.sidebar_hover_zone.setGeometry(0, 14, 12, zone_h)
+        self.sidebar_hover_zone.setVisible(enabled)
+        if not enabled:
+            self.sidebar_hide_timer.stop()
+            self.sidebar_reveal_animation.stop()
+            self.sidebar_reveal.hide()
+            self.sidebar_reveal.move(-self.sidebar_reveal.width(), 14)
+            return
+        if not self.sidebar_reveal.isVisible():
+            self.sidebar_reveal.move(-self.sidebar_reveal.width(), 14)
+        self.sidebar_hover_zone.raise_()
+        self.sidebar_reveal.raise_()
+
+    def _sidebar_hover_changed(self, on: bool) -> None:
+        if on:
+            self.sidebar_hide_timer.stop()
+            if (self._fs or self._focus_mode or self.sidebar.is_open
+                    or self.edition() == "legacy" or self.store["sidebar_always_visible"]):
+                return
+            self.sidebar_reveal_animation.stop()
+            y = 16
+            self.sidebar_reveal.move(-self.sidebar_reveal.width(), y)
+            self.sidebar_reveal.show()
+            self.sidebar_hover_zone.raise_()
+            self.sidebar_reveal.raise_()
+            self.sidebar_reveal_animation.setStartValue(self.sidebar_reveal.pos())
+            self.sidebar_reveal_animation.setEndValue(QPoint(8, y))
+            self.sidebar_reveal_animation.start()
         else:
-            self.bmbar.setVisible(bool(self.store["show_bookmarks_bar"]))
-        self.esc_fullscreen.setEnabled(hidden)
+            self.sidebar_hide_timer.start()
+
+    def _hide_sidebar_reveal(self) -> None:
+        if self.sidebar.is_open or not self.sidebar_reveal.isVisible():
+            return
+        self.sidebar_reveal_animation.stop()
+        self.sidebar_reveal_animation.setStartValue(self.sidebar_reveal.pos())
+        self.sidebar_reveal_animation.setEndValue(QPoint(-self.sidebar_reveal.width(), 16))
+        self.sidebar_reveal_animation.finished.connect(self._finish_sidebar_reveal_hide)
+        self.sidebar_reveal_animation.start()
+
+    def _finish_sidebar_reveal_hide(self) -> None:
+        if self.sidebar_reveal.x() < 0:
+            self.sidebar_reveal.hide()
+        try:
+            self.sidebar_reveal_animation.finished.disconnect(self._finish_sidebar_reveal_hide)
+        except TypeError:
+            pass
 
     def _leave_hidden_chrome(self) -> None:
         if self._fs:
@@ -6488,10 +7533,11 @@ class MainWindow(QMainWindow):
             self.toggle_focus()
 
     def toggle_focus(self) -> None:
+        self.toggle_zen()
+
+    def toggle_zen(self) -> None:
         self._focus_mode = not self._focus_mode
         self._apply_chrome_visibility()
-        if self._focus_mode:
-            self.toast("Focus mode. Press Esc or Ctrl+Shift+F to bring the toolbar back")
 
     def _html_fullscreen(self, request) -> None:
         request.accept()
@@ -6542,6 +7588,10 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
+        if hasattr(self, "wallpaper_layer") and self.centralWidget() is not None:
+            self.wallpaper_layer.setGeometry(self.centralWidget().rect())
+            self.wallpaper_layer.lower()
+        self.update_sidebar_reveal()
         extra = self.selbar.sizeHint().width() if self.selbar.isVisible() else 0
         self.tabbar.available = max(200, self.width() - 160 - extra)
         self.tabbar.relayout()
@@ -6552,6 +7602,10 @@ class MainWindow(QMainWindow):
             self._bm_timer.timeout.connect(self.refresh_bookmarks_bar)
         self._bm_timer.start(120)
         self.mini.reposition()
+        if hasattr(self, "download_popup"):
+            self.download_popup.reposition()
+        if hasattr(self, "_site_notifications"):
+            self._position_site_notifications()
 
     def showEvent(self, e) -> None:
         super().showEvent(e)
@@ -6559,6 +7613,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self._closing = True
+        for notification in list(self._site_notifications):
+            notification.dismiss()
         if not self.private and len([w for w in self.app.windows_of(self.store) if not w.private]) == 1:
             snap = self.snapshot()
             self.store.set("session", snap["tabs"])
@@ -6568,7 +7624,6 @@ class MainWindow(QMainWindow):
         except (TypeError, RuntimeError):
             pass
         self.devdock.hide()
-        self.split_host.detach_all()
         for v in self.tab_views():
             v.deleteLater()
         self.app.window_closed(self)
@@ -6926,16 +7981,15 @@ class SetupWizard(QDialog):
 
         # 2 shortcuts
         w, l = self._page()
-        l.addWidget(self._h1("Tab groups and split view"))
+        l.addWidget(self._h1("Organize your tabs"))
         l.addWidget(self._lead("Keep workflows organised. Here are the shortcuts worth learning."))
         l.addSpacing(14)
         for keys, text in ((["Ctrl", "click"], "Select several tabs. Add Shift to select a range."),
                            (["Ctrl", "Shift", "G"], "Group tabs, then name and colour the group."),
                            (["Click a chip"], "Collapse or expand a tab group."),
-                           (["Ctrl", "\\"], "Open a tab beside this one, side by side (split view)."),
-                           (["Ctrl", "Alt", "\u2190 \u2192 \u2191 \u2193"], "Move between split panes."),
                            (["Ctrl", "K"], "Command palette: find any tab, page or command."),
-                           (["Ctrl", "B"], "Sidebar: memory limiter, notes, web panels, music.")):
+                           (["Ctrl", "B"], "Show or hide the full sidebar. Customize its panels and order."),
+                           (["Ctrl", "Shift", "Z"], "Zen mode: hide browser controls. Esc returns.")):
             r = QHBoxLayout()
             kc = QHBoxLayout()
             kc.setSpacing(6)
@@ -6982,15 +8036,15 @@ class SetupWizard(QDialog):
 
         # 4 version
         w, l = self._page()
-        l.addWidget(self._h1("Choose your version"))
-        l.addWidget(self._lead("You can switch any time in Settings, then Experimental."))
+        l.addWidget(self._h1("Choose your interface style"))
+        l.addWidget(self._lead("Choose how the browser looks. You can switch styles any time in Settings."))
         l.addSpacing(10)
         self.version_group = QButtonGroup(self)
         for key, title, desc, tag in (
-                ("stable", "2.1.1 Stable", "The complete new look: floating pill tabs, bright icons, smart suggestions from your past visits, "
-                 "YouTube Music in the sidebar with a pinnable mini player, and live wallpapers.", "Recommended"),
-                ("nightly", "2.1.0 Nightly", "The earlier look with every experimental feature: tab groups, split view, extensions and the memory limiter.", ""),
-                ("legacy", "2.0.0 Legacy", "The classic interface, without the sidebar, split view or animations.", "")):
+                ("stable", "2.1.2-Renovo GA", "The first general release: customizable sidebar, AI companion, live download progress, print preview, "
+                 "floating tabs, YouTube Music, and live wallpapers.", "Recommended"),
+                ("nightly", "Classic 2.1", "The earlier AwesomeBrowse 2 look with tab groups, extensions and the memory limiter.", ""),
+                ("legacy", "2.0.0 Legacy", "The classic interface, without the sidebar or animations.", "")):
             card = VersionCard(title, desc, tag)
             card.setChecked(key == "stable")
             card.clicked.connect(lambda _=False, k=key: setattr(self, "edition", k))
@@ -7363,6 +8417,27 @@ class BrowserApp(QObject):
     # internal pages ---------------------------------------------------------
     def serve(self, ctx: Context, host: str, path: str, query: str = ""):
         store = ctx.store
+        if host == "space":
+            if not SPACE_EDITION:
+                return None
+            app_file = Path(__file__).resolve().parent / "awesomespace" / "index.html"
+            try:
+                if not app_file.is_file():
+                    return None
+                html = app_file.read_text(encoding="utf-8")
+            except OSError:
+                return None
+            theme = resolve_theme(store)
+            space_vars = {
+                "bg": theme["bg"], "panel": theme["surface"], "panel2": theme["surface2"],
+                "line": theme["border"], "text": theme["text"], "muted": theme["sub"],
+                "accent": theme["accent"], "accent-soft": rgba(theme["accent"], 0.22),
+                "on-accent": theme["on_accent"], "hover": theme["hover"],
+            }
+            space_css = ":root{" + ";".join(f"--{key}:{value}" for key, value in space_vars.items())
+            space_css += f";color-scheme:{theme['kind']};}}"
+            html = html.replace("/*__AWESOME_THEME__*/", space_css, 1)
+            return html.encode("utf-8"), "text/html; charset=utf-8"
         if host == "about":
             host, path = "settings", "/about"
         if host == "ext":
@@ -7392,6 +8467,14 @@ class BrowserApp(QObject):
         engines = [{"id": e[0], "label": e[1], "url": e[2]} for e in ENGINES]
         order = sorted(THEMES, key=lambda k: (THEMES[k]["kind"] != "dark", list(THEMES).index(k)))
         if host == "newtab":
+            widgets = list(store["widgets"])
+            if SPACE_EDITION and not any(w.get("url") == "awesome://space" for w in widgets):
+                widgets.append({"id": "awesomespace", "name": "AwesomeSpace", "url": "awesome://space"})
+                store.set("widgets", widgets)
+            elif not SPACE_EDITION:
+                clean_widgets = [w for w in widgets if w.get("url") != "awesome://space"]
+                if clean_widgets != widgets:
+                    store.set("widgets", clean_widgets)
             state = {k: store[k] for k in ("name", "color", "theme", "search_engine", "widgets", "wallpaper",
                                            "user_wallpapers", "wallpaper_dim", "wallpaper_blur", "show_clock",
                                            "show_widgets", "clock_24h", "description", "avatar_emoji", "animations")}
@@ -7402,7 +8485,8 @@ class BrowserApp(QObject):
             return render_template(NEWTAB_HTML, store, state), "text/html"
         if host == "settings":
             skip = {"history", "bookmarks", "session", "session_groups", "widgets", "downloads", "user_wallpapers",
-                    "notes", "web_panels", "workspaces", "zoom_by_host", "extensions"}
+                    "notes", "web_panels", "workspaces", "zoom_by_host", "extensions", "sidebar_order",
+                    "sidebar_panels", "ai_provider", "renovo_ui_version"}
             state = {k: v for k, v in store.data.items() if k not in skip}
             state.update(engines=engines, colors=AVATAR_COLORS, section=path.strip("/"),
                          theme_labels={k: v["label"] for k, v in THEMES.items()},
@@ -7410,7 +8494,7 @@ class BrowserApp(QObject):
                          services=[{"id": a, "label": b, "url": c} for a, b, c in ACCOUNT_SERVICES],
                          profiles=[{"id": s.id, "name": s["name"], "color": s["color"], "current": s is store,
                                     "description": s["description"]} for s in self.list_profiles()],
-                         about=[["Version", APP_VERSION + " (nightly)"], ["Engine", f"Chromium {ctx.chromium}"],
+                         about=[["Version", APP_VERSION], ["Engine", f"Chromium {ctx.chromium}"],
                                 ["Qt WebEngine", self.qt_version()], ["Profile folder", str(store.dir)],
                                 ["Mode", "Private" if ctx.private else "Standard"]])
             return render_template(SETTINGS_HTML, store, state), "text/html"
