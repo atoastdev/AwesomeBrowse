@@ -9,7 +9,7 @@
 set -euo pipefail
 
 APP_SLUG="awesomebrowse"
-ENTRY_POINT="awesomebrowse_2.1.2_renovo.py"
+ENTRY_POINT="awesomebrowse_2.1.21_renovo_hotfix.py"
 CHOSEN_EDITION="${AWESOMEBROWSE_EDITION:-}"
 
 if [ "${1:-}" = "--edition" ]; then
@@ -27,8 +27,8 @@ fi
 
 if [ -z "$CHOSEN_EDITION" ]; then
     echo "Choose an AwesomeBrowse edition before installing:"
-    echo "  1) AwesomeBrowse 2.1.2-Renovo"
-    echo "  2) AwesomeBrowse 2.1.2-Renovo with AwesomeSpace"
+    echo "  1) AwesomeBrowse 2.1.21-Renovo Hotfix"
+    echo "  2) AwesomeBrowse 2.1.21-Renovo Hotfix with AwesomeSpace"
     if [ -t 0 ]; then
         printf "Selection [1]: "
         read -r EDITION_CHOICE
@@ -43,8 +43,8 @@ if [ -z "$CHOSEN_EDITION" ]; then
 fi
 
 case "$CHOSEN_EDITION" in
-    stable) APP_NAME="AwesomeBrowse 2.1.2-Renovo" ;;
-    space) APP_NAME="AwesomeBrowse 2.1.2-Renovo with AwesomeSpace" ;;
+    stable) APP_NAME="AwesomeBrowse 2.1.21-Renovo Hotfix" ;;
+    space) APP_NAME="AwesomeBrowse 2.1.21-Renovo Hotfix with AwesomeSpace" ;;
     *) echo "error: edition must be stable or space" >&2; exit 2 ;;
 esac
 

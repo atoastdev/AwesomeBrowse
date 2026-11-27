@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-AwesomeBrowse 2  (2.1.2-Renovo, first GA release)
+AwesomeBrowse 2  (2.1.21-Renovo Hotfix)
 A clean, themeable, Chromium-based browser built on Qt WebEngine.
 
     pip install -r requirements.txt   # PyQt6, PyQt6-WebEngine, psutil (QtMultimedia is included with PyQt6)
-    python awesomebrowse_2.1.2_renovo.py [url ...] [--private] [--profile ID] [--safe-mode]
+    python awesomebrowse_2.1.21_renovo_hotfix.py [url ...] [--private] [--profile ID] [--safe-mode]
 """
 from __future__ import annotations
 
 import copy
+import hmac
 import io
 import json
 import math
@@ -16,6 +17,7 @@ import mimetypes
 import os
 import random
 import re
+import secrets
 import shutil
 import sys
 import time
@@ -56,7 +58,7 @@ from PyQt6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QCompleter, 
 
 APP_NAME = "AwesomeBrowse 2"
 SPACE_EDITION = os.environ.get("AWESOMEBROWSE_EDITION", "stable").strip().lower() == "space"
-APP_VERSION = "2.1.2-Renovo"
+APP_VERSION = "2.1.21-Renovo (Hotfix)"
 SCHEME = "awesome"
 NEWTAB = "awesome://newtab"
 
@@ -242,6 +244,7 @@ def web_vars(t: dict) -> dict:
         "sub": t["sub"], "accent": t["accent"], "on-accent": t["on_accent"], "border": t["border"],
         "hover": t["hover"], "accent-soft": rgba(t["accent"], 0.22),
         "glass": rgba(t["surface"], 0.74), "glass-border": rgba(t["text"], 0.16),
+    "glass-soft": rgba(t["surface"], 0.56),
     }
 
 
@@ -986,12 +989,24 @@ def match_pattern_regex(pat: str) -> str | None:
 def crx_zip_bytes(data: bytes) -> bytes:
     """Strip the CRX2/CRX3 header and return the embedded zip archive."""
     if data[:4] == b"Cr24":
+        if len(data) < 8:
+            raise ValueError("The CRX header is incomplete")
         ver = int.from_bytes(data[4:8], "little")
         if ver == 3:
-            return data[12 + int.from_bytes(data[8:12], "little"):]
+            if len(data) < 12:
+                raise ValueError("The CRX header is incomplete")
+            start = 12 + int.from_bytes(data[8:12], "little")
+            if start >= len(data):
+                raise ValueError("The CRX header points outside the file")
+            return data[start:]
         if ver == 2:
+            if len(data) < 16:
+                raise ValueError("The CRX header is incomplete")
             pk, sg = int.from_bytes(data[8:12], "little"), int.from_bytes(data[12:16], "little")
-            return data[16 + pk + sg:]
+            start = 16 + pk + sg
+            if start >= len(data):
+                raise ValueError("The CRX header points outside the file")
+            return data[start:]
         raise ValueError("Unsupported CRX version")
     if data[:2] == b"PK":
         return data
@@ -1318,21 +1333,24 @@ paintWall();tick();setInterval(tick,5000);layout();paintEng();renderGrid();rende
 SETTINGS_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Settings</title>
 <style>/*__ROOT__*/
 /*__BASE__*/
-.shell{display:flex;height:100%}
-.side{width:264px;padding:22px 14px;border-right:1px solid var(--border);background:var(--surface);flex:none;display:flex;flex-direction:column;gap:2px}
-.side h1{font-size:20px;margin:2px 12px 16px;font-weight:650}
+.shell{display:flex;height:100%;background:transparent}
+html,body{background:transparent!important}
+body{overflow:hidden}
+.side{width:264px;padding:22px 14px;border-right:1px solid var(--glass-border);background:var(--glass);backdrop-filter:blur(26px) saturate(1.35);flex:none;display:flex;flex-direction:column;gap:2px}
+.side h1{font-size:20px;margin:2px 12px 16px;font-weight:650;letter-spacing:-.025em}
 .nav a{display:block;padding:9px 12px;border-radius:9px;color:var(--sub);cursor:pointer}
-.nav a:hover{background:var(--hover);color:var(--text)}
-.nav a.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
-.main{flex:1;overflow:auto;padding:26px 48px 90px}
+.nav a:hover{background:var(--glass-soft);color:var(--text)}
+.nav a.on{background:var(--accent-soft);color:var(--accent);font-weight:600;box-shadow:inset 0 0 0 1px var(--glass-border)}
+.main{flex:1;overflow:auto;padding:26px 48px 90px;scroll-behavior:smooth;overscroll-behavior:contain}
 .wrap{max-width:780px;margin:0 auto}
 .top{display:flex;justify-content:flex-end;margin-bottom:20px}
-.top .text{width:300px;border-radius:19px;height:38px;padding:0 16px}
+.top .text{width:300px;border-radius:19px;height:38px;padding:0 16px;background:var(--glass);backdrop-filter:blur(18px);border-color:var(--glass-border)}
 .sec{display:none}.sec.on{display:block}
-.sec>h2{margin:4px 0 16px;font-size:22px;font-weight:650}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;margin-bottom:18px;overflow:hidden}
+.sec>h2{margin:4px 0 16px;font-size:22px;font-weight:650;letter-spacing:-.025em}
+.card{background:var(--glass);backdrop-filter:blur(22px) saturate(1.2);border:1px solid var(--glass-border);border-radius:16px;margin-bottom:18px;overflow:hidden;box-shadow:0 12px 34px rgba(0,0,0,.10)}
 .card>h3{margin:0;padding:16px 20px 12px;font-size:14px;font-weight:650}
-.row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:14px 20px;border-top:1px solid var(--border)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:14px 20px;border-top:1px solid var(--glass-border);transition:background .16s ease}
+.row:hover{background:rgba(255,255,255,.035)}
 .row .t b{font-weight:500;display:block}.row .t small{color:var(--sub);display:block;max-width:440px}
 .row.col{flex-direction:column;align-items:stretch}
 .profile{display:flex;gap:20px;align-items:center;padding:20px}
@@ -1353,7 +1371,7 @@ SETTINGS_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8"><
 table.sc{width:100%;border-collapse:collapse}table.sc td{padding:10px 20px;border-top:1px solid var(--border)}table.sc td:first-child{color:var(--sub);width:42%}
 kbd{font:12px ui-monospace,Consolas,monospace;background:var(--surface2);border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;padding:1px 7px}
 #cm{position:fixed;inset:0;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);display:none;place-items:center;z-index:9}#cm.open{display:grid}
-.dlg{width:min(560px,92vw);max-height:80vh;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:16px;box-shadow:0 24px 80px rgba(0,0,0,.5)}
+.dlg{width:min(560px,92vw);max-height:80vh;display:flex;flex-direction:column;background:var(--glass);backdrop-filter:blur(28px);border:1px solid var(--glass-border);border-radius:16px;box-shadow:0 24px 80px rgba(0,0,0,.35)}
 .dlg header{display:flex;gap:12px;align-items:center;padding:18px 20px;border-bottom:1px solid var(--border)}.dlg header h3{margin:0;flex:1;font-size:17px}
 .dlg .body{overflow:auto;flex:1}.dlg .body .row{padding:10px 20px}.dlg footer{padding:14px 20px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;color:var(--sub)}
 .empty{padding:34px;text-align:center;color:var(--sub)}
@@ -1363,7 +1381,7 @@ kbd{font:12px ui-monospace,Consolas,monospace;background:var(--surface2);border:
 .av2{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:700}
 </style></head><body><div class="shell">
 <aside class="side"><h1>Settings</h1><nav class="nav" id="nav">
-<a data-s="profile">Profile</a><a data-s="appearance">Appearance</a><a data-s="search">Search engine</a><a data-s="startup">On startup</a><a data-s="privacy">Privacy and cookies</a><a data-s="downloads">Downloads</a><a data-s="experimental">Advanced</a><a data-href="awesome://extensions">Extensions</a><a data-s="about">About</a></nav></aside>
+<a data-s="profile">Profile</a><a data-s="appearance">Appearance</a><a data-s="search">Search engine</a><a data-s="startup">On startup</a><a data-s="privacy">Privacy and cookies</a><a data-s="downloads">Downloads</a><a data-s="experimental">Advanced</a><a data-href="awesome://extensionstore">Extensions store</a><a data-href="awesome://extensions">Manage extensions</a><a data-s="about">About</a></nav></aside>
 <div class="main"><div class="wrap">
 <div class="top"><input class="text" id="find" placeholder="Search settings" autocomplete="off"></div>
 
@@ -1409,7 +1427,7 @@ kbd{font:12px ui-monospace,Consolas,monospace;background:var(--surface2);border:
   <div class="row"><div class="t"><b>Block third-party cookies</b><small>Stops other sites from tracking you with cookies. Some embedded content may stop working.</small></div><label class="switch"><input type="checkbox" data-key="block_third_party_cookies"><span></span></label></div>
   <div class="row"><div class="t"><b>See all cookies and site data</b><small>Review and remove cookies by site.</small></div><button class="btn" id="cookies">Manage cookies</button></div></div>
  <div class="card"><h3>Protection</h3>
-  <div class="row"><div class="t"><b>Block ads and trackers</b><small>Blocks requests to well-known advertising and tracking domains.</small></div><label class="switch"><input type="checkbox" data-key="block_trackers"><span></span></label></div>
+  <div class="row"><div class="t"><b>Block ads and trackers</b><small>Blocks tracking beacons and analytics calls while allowing site scripts and styles to load.</small></div><label class="switch"><input type="checkbox" data-key="block_trackers"><span></span></label></div>
   <div class="row"><div class="t"><b>Send &ldquo;Do Not Track&rdquo; request</b></div><label class="switch"><input type="checkbox" data-key="send_dnt"><span></span></label></div></div>
  <div class="card"><h3>Site permissions</h3><p class="muted">When a site requests notifications, your microphone, or your camera, AwesomeBrowse asks before access is granted. Choose Allow or Block in the site prompt.</p></div>
  <div class="card"><h3>Clear browsing data</h3>
@@ -1426,13 +1444,13 @@ kbd{font:12px ui-monospace,Consolas,monospace;background:var(--surface2);border:
 
 <section class="sec" data-s="experimental"><h2>Advanced</h2>
  <div class="card"><h3>Interface and features</h3>
-  <div class="row"><div class="t"><b>Interface style</b><small>Renovo uses floating tabs and the current layout. Classic keeps the earlier 2.1 layout. Legacy uses the classic 2.0 interface without the sidebar.</small></div><select data-key="edition"><option value="stable">2.1.2-Renovo</option><option value="nightly">Classic 2.1</option><option value="legacy">Legacy 2.0</option></select></div>
+  <div class="row"><div class="t"><b>Interface style</b><small>Renovo uses floating tabs and the current layout. Classic keeps the earlier 2.1 layout. Legacy uses the classic 2.0 interface without the sidebar.</small></div><select data-key="edition"><option value="stable">2.1.21-Renovo Hotfix</option><option value="nightly">Classic 2.1</option><option value="legacy">Legacy 2.0</option></select></div>
   <div class="row"><div class="t"><b>Animations</b><small>Tab open and close, tab switching, panels and the new tab page. Turn off for a flatter, snappier feel.</small></div><label class="switch"><input type="checkbox" data-key="animations"><span></span></label></div>
   <div class="row"><div class="t"><b>Smooth scrolling</b><small>Takes effect on the next page load.</small></div><label class="switch"><input type="checkbox" data-key="smooth_scroll"><span></span></label></div>
   <div class="row"><div class="t"><b>Load restored tabs on demand</b><small>After a restart, tabs load only when you open them. Much faster startup and lower memory.</small></div><label class="switch"><input type="checkbox" data-key="lazy_restore"><span></span></label></div>
   <div class="row"><div class="t"><b>Remember zoom for each site</b></div><label class="switch"><input type="checkbox" data-key="zoom_per_site"><span></span></label></div>
-  <div class="row"><div class="t"><b>Open the sidebar at startup</b><small>Press Ctrl+B, or hover the left edge of the page.</small></div><label class="switch"><input type="checkbox" data-key="sidebar_open"><span></span></label></div>
-  <div class="row"><div class="t"><b>Keep sidebar visible</b><small>Pin it open in every window for this profile.</small></div><label class="switch"><input type="checkbox" data-key="sidebar_always_visible"><span></span></label></div></div>
+  <div class="row"><div class="t"><b>Open a sidebar panel at startup</b><small>A pinned rail starts collapsed. Press Ctrl+B or select a panel to open it.</small></div><label class="switch"><input type="checkbox" data-key="sidebar_open"><span></span></label></div>
+  <div class="row"><div class="t"><b>Keep sidebar rail visible</b><small>Keep the thin icon rail on screen. Its panels still open and close when selected.</small></div><label class="switch"><input type="checkbox" data-key="sidebar_always_visible"><span></span></label></div></div>
 </section>
 
 <section class="sec" data-s="about"><h2>About AwesomeBrowse 2</h2>
@@ -1547,8 +1565,8 @@ EXT_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title
 .note{margin-top:28px;padding:18px 20px;border:1px solid var(--border);border-radius:14px;background:var(--surface);color:var(--sub);font-size:13.5px}
 .note b{color:var(--text)}
 </style></head><body><div class="wrap">
-<div class="head"><h1>Extensions</h1></div>
-<p class="lead">Add Chrome extensions to this profile. They run in an isolated layer, separate from the sites they change.</p>
+<div class="head"><h1>Extensions</h1><a class="btn" href="awesome://extensionstore">Browse the Awesome Extensions Store</a></div>
+<p class="lead">Add Chrome extensions to this profile. Each install shows its requested permissions and website access before it can run.</p>
 <div class="bar"><button class="btn primary" id="unpacked">Load unpacked folder</button><button class="btn" id="file">Install .crx or .zip</button></div>
 <div class="bar"><input class="text" id="store" placeholder="Chrome Web Store link or extension ID"><button class="btn" id="storego">Install from store</button></div>
 <div id="msg"></div>
@@ -1588,6 +1606,47 @@ $('#storego').onclick=()=>{const v=$('#store').value.trim();if(!v)return;say('Co
 $('#store').onkeydown=e=>{if(e.key==='Enter')$('#storego').click()};
 render();
 </script></body></html>"""
+
+EXTENSION_STORE_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Awesome Extensions Store</title>
+<style>/*__ROOT__*/
+/*__BASE__*/
+html,body{background:transparent!important}
+body{min-height:100%;overflow:auto}
+.page{width:min(1040px,100%);margin:0 auto;padding:46px 34px 72px}
+.top{display:flex;align-items:center;gap:12px;margin-bottom:36px}
+.brand{width:42px;height:42px;border:1px solid var(--glass-border);border-radius:14px;background:var(--glass);backdrop-filter:blur(16px);display:grid;place-items:center;color:var(--accent)}
+.brand svg{width:22px;height:22px}
+.wordmark{font-size:14px;font-weight:650;letter-spacing:.01em}.wordmark small{display:block;color:var(--sub);font-size:11px;font-weight:500}
+.top a{margin-left:auto}
+.hero{padding:40px clamp(24px,6vw,64px);border:1px solid var(--glass-border);border-radius:28px;background:var(--glass);backdrop-filter:blur(28px) saturate(1.25);box-shadow:0 22px 70px rgba(0,0,0,.18);overflow:hidden;position:relative}
+.hero:after{content:"";position:absolute;width:300px;height:300px;right:-100px;top:-170px;background:radial-gradient(circle,var(--accent-soft),transparent 68%);pointer-events:none}
+.eyebrow{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--glass-border);background:var(--glass-soft);border-radius:999px;padding:6px 11px;color:var(--accent);font-size:12px;font-weight:650}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--accent);box-shadow:0 0 14px var(--accent)}
+h1{font-size:clamp(32px,5vw,52px);line-height:1.05;letter-spacing:-.045em;margin:18px 0 12px;font-weight:650}
+.lead{font-size:16px;color:var(--sub);max-width:580px;margin:0 0 24px}
+.search{display:flex;align-items:center;gap:10px;max-width:610px;height:50px;padding:5px 7px 5px 16px;border:1px solid var(--glass-border);border-radius:999px;background:var(--glass-soft);backdrop-filter:blur(18px)}
+.search input{min-width:0;flex:1;border:0;outline:0;background:transparent;color:var(--text)}.search input::placeholder{color:var(--sub)}
+.search button{height:38px;padding:0 15px;border:0;border-radius:999px;background:var(--accent);color:var(--on-accent);font-weight:600}
+.section{display:flex;align-items:end;gap:16px;margin:38px 2px 14px}.section h2{margin:0;font-size:19px;letter-spacing:-.02em}.section p{margin:4px 0 0;color:var(--sub);font-size:13px}.section .pill{margin-left:auto;border:1px solid var(--glass-border);background:var(--glass-soft);border-radius:999px;padding:6px 10px;color:var(--sub);font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.card{min-height:202px;padding:19px;border:1px solid var(--glass-border);border-radius:20px;background:var(--glass);backdrop-filter:blur(20px);box-shadow:0 12px 32px rgba(0,0,0,.11);display:flex;flex-direction:column;transition:transform .18s,border-color .18s}
+.card:hover{transform:translateY(-2px);border-color:rgba(255,255,255,.28)}
+.cardhead{display:flex;align-items:center;gap:12px}.icon{width:42px;height:42px;border-radius:14px;background:var(--accent-soft);display:grid;place-items:center;color:var(--accent);font-weight:700;font-size:18px}.card h3{font-size:15px;margin:0}.cardhead small{display:block;color:var(--sub);margin-top:3px}
+.card p{color:var(--sub);font-size:13px;line-height:1.55;margin:17px 0}
+.soon{margin-top:auto;align-self:flex-start;padding:5px 10px;border:1px solid var(--glass-border);border-radius:999px;color:var(--sub);background:var(--glass-soft);font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase}
+.foot{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:24px;padding:17px 20px;border:1px solid var(--glass-border);border-radius:18px;background:var(--glass-soft);backdrop-filter:blur(16px);color:var(--sub);font-size:13px}
+@media(max-width:760px){.page{padding:24px 16px 44px}.hero{padding:30px 24px}.grid{grid-template-columns:1fr}.foot{align-items:flex-start;flex-direction:column}}
+</style></head><body><main class="page">
+<header class="top"><span class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4h3a2 2 0 1 1 4 0h2a3 3 0 0 1 3 3v2a2 2 0 1 1 0 4v3a3 3 0 0 1-3 3h-3a2 2 0 1 1-4 0H7a3 3 0 0 1-3-3v-3a2 2 0 1 0 0-4V7a3 3 0 0 1 3-3z"/></svg></span><span class="wordmark">AwesomeBrowse<small>Extensions Store</small></span><a class="btn" href="awesome://extensions">Manage installed</a></header>
+<section class="hero"><span class="eyebrow"><i class="dot"></i> A new place for your browser</span><h1>Make your browser<br>more yours.</h1><p class="lead">Discover tools that help you focus, create, and get more from the web. The Awesome Extensions Store is being prepared for launch.</p><form class="search" onsubmit="return false"><input disabled placeholder="Search extensions — coming soon" aria-label="Search extensions"><button type="button" disabled>Search</button></form></section>
+<div class="section"><div><h2>Coming to AwesomeBrowse</h2><p>A thoughtful extension experience is on the way.</p></div><span class="pill">Store preview</span></div>
+<section class="grid" aria-label="Upcoming store features">
+ <article class="card"><div class="cardhead"><span class="icon">✦</span><div><h3>Useful extensions</h3><small>Curated for everyday browsing</small></div></div><p>Find tools for productivity, creativity, accessibility, and more in one clear catalogue.</p><span class="soon">Coming soon</span></article>
+ <article class="card"><div class="cardhead"><span class="icon">⌕</span><div><h3>Clear permissions</h3><small>Know what an extension can access</small></div></div><p>Review the sites and browser features an extension requests before you install it.</p><span class="soon">Coming soon</span></article>
+ <article class="card"><div class="cardhead"><span class="icon">◇</span><div><h3>Simple installs</h3><small>Find and manage in one place</small></div></div><p>Browse trusted listings and manage your installed extensions from a consistent interface.</p><span class="soon">Coming soon</span></article>
+</section>
+<footer class="foot"><span>Extensions will come to AwesomeBrowse soon.</span><a href="awesome://extensions">Manage extensions already installed</a></footer>
+</main></body></html>"""
 
 
 LIB_HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8"><title>__TITLE__</title>
@@ -1687,7 +1746,13 @@ class RequestInterceptor(QWebEngineUrlRequestInterceptor):
         if data.get("block_trackers"):
             host = info.requestUrl().host()
             main = info.resourceType() == QWebEngineUrlRequestInfo.ResourceType.ResourceTypeMainFrame
-            if host and not main and is_tracker_host(host):
+            kind = info.resourceType()
+            resource_types = QWebEngineUrlRequestInfo.ResourceType
+            low_value = {
+                getattr(resource_types, name, None)
+                for name in ("ResourceTypePing", "ResourceTypeCspReport", "ResourceTypeXhr")
+            }
+            if host and not main and kind in low_value and is_tracker_host(host):
                 info.block(True)
                 return
         if data.get("send_dnt"):
@@ -1873,8 +1938,43 @@ class SchemeHandler(QWebEngineUrlSchemeHandler):
     def requestStarted(self, job: QWebEngineUrlRequestJob) -> None:
         url = job.requestUrl()
         host, path = url.host(), url.path()
+        method = bytes(job.requestMethod()).upper()
+        if host == "ext":
+            parts = path.lstrip("/").split("/", 1)
+            if parts and re.fullmatch(r"[a-p]{32}", parts[0]):
+                resource = parts[1] if len(parts) > 1 else ""
+                job.redirect(QUrl(f"{SCHEME}://{parts[0]}/{resource}"))
+            else:
+                job.fail(QWebEngineUrlRequestJob.Error.UrlNotFound)
+            return
+        if host == "extapi" and method == b"OPTIONS":
+            try:
+                job.setAdditionalResponseHeaders({
+                    QByteArray(b"Access-Control-Allow-Origin"): [QByteArray(b"*")],
+                    QByteArray(b"Access-Control-Allow-Methods"): [QByteArray(b"GET, OPTIONS")],
+                    QByteArray(b"Access-Control-Allow-Headers"): [QByteArray(b"x-awesomebrowser-extension")],
+                    QByteArray(b"Access-Control-Max-Age"): [QByteArray(b"600")],
+                })
+            except (TypeError, AttributeError):
+                job.fail(QWebEngineUrlRequestJob.Error.RequestDenied)
+                return
+            buf = QBuffer(job)
+            buf.setData(QByteArray())
+            buf.open(QIODevice.OpenModeFlag.ReadOnly)
+            job.reply(QByteArray(b"text/plain"), buf)
+            return
+        if host == "extapi" and method != b"GET":
+            job.fail(QWebEngineUrlRequestJob.Error.RequestDenied)
+            return
         try:
-            result = self.ctx.app.serve(self.ctx, host, path, url.query())
+            query = url.query()
+            if host == "extapi":
+                headers = job.requestHeaders()
+                token = next((value for key, value in headers.items()
+                              if bytes(key).lower() == b"x-awesomebrowser-extension"), QByteArray())
+                from urllib.parse import urlencode
+                query += ("&" if query else "") + urlencode({"_token_header": bytes(token).decode("ascii", "ignore")})
+            result = self.ctx.app.serve(self.ctx, host, path, query)
         except Exception:  # never let an internal page crash the browser
             result = None
         if result is None:
@@ -1884,7 +1984,7 @@ class SchemeHandler(QWebEngineUrlSchemeHandler):
         buf = QBuffer(job)
         buf.setData(QByteArray(data))
         buf.open(QIODevice.OpenModeFlag.ReadOnly)
-        if host in ("ext", "extapi"):
+        if host == "extapi":
             try:
                 job.setAdditionalResponseHeaders({QByteArray(b"Access-Control-Allow-Origin"): [QByteArray(b"*")]})
             except (TypeError, AttributeError):
@@ -2209,7 +2309,7 @@ class Bridge(QObject):
         ext, w = self._ext(), self.page.window
         rec = ext.get(ext_id) if ext else None
         if rec and rec["options"] and w:
-            QTimer.singleShot(0, lambda: w.open_url(f"{SCHEME}://ext/{ext_id}/{rec['options']}"))
+            QTimer.singleShot(0, lambda: w.open_url(f"{SCHEME}://{ext_id}/{rec['options']}"))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2298,7 +2398,7 @@ class WebPage(QWebEnginePage):
             return False
         if is_main:
             want = url.scheme() == SCHEME
-            if want and url.host() == "newtab":
+            if want and url.host() in ("newtab", "settings", "extensionstore"):
                 self.setBackgroundColor(QColor(0, 0, 0, 0))
             else:
                 self.setBackgroundColor(QColor(255, 255, 255))
@@ -3849,7 +3949,7 @@ class Sidebar(QWidget):
         rl.setContentsMargins(5, 8, 5, 8)
         rl.setSpacing(4)
         self._icons: list = []
-        self.toggle_btn = self._rail_button("sidebar", "Hide the sidebar (Ctrl+B)", self.toggle)
+        self.toggle_btn = self._rail_button("sidebar", "Show sidebar panel (Ctrl+B)", self.toggle)
         rl.addWidget(self.toggle_btn)
         rl.addSpacing(6)
         self.buttons: dict[str, QToolButton] = {}
@@ -3868,7 +3968,7 @@ class Sidebar(QWidget):
         rl.addStretch(1)
         self.customize_btn = self._rail_button("spark", "Customize sidebar", self.customize)
         rl.addWidget(self.customize_btn)
-        self.rail.setVisible(False)
+        self.rail.setVisible(bool(win.store["sidebar_always_visible"]))
         h.addWidget(self.rail)
 
         self.panel = QWidget()
@@ -3946,10 +4046,9 @@ class Sidebar(QWidget):
     def set_open(self, on: bool, animate: bool = True) -> None:
         if on == self.is_open:
             return
-        if not on and self.win.store["sidebar_always_visible"]:
-            return
         self.is_open = on
         self.win.store.set("sidebar_open", on)
+        self.toggle_btn.setToolTip("Hide sidebar panel (Ctrl+B)" if on else "Show sidebar panel (Ctrl+B)")
         self.win.update_sidebar_reveal()
         self._anim.stop()
         self.panel.setMinimumWidth(0)
@@ -3967,7 +4066,8 @@ class Sidebar(QWidget):
 
     def _anim_done(self) -> None:
         self.panel.setMinimumWidth(self.PANEL_W if self.is_open else 0)
-        self.rail.setVisible(self.is_open)
+        self.rail.setVisible(self.is_open or self.win.store["sidebar_always_visible"])
+        self.toggle_btn.setToolTip("Hide sidebar panel (Ctrl+B)" if self.is_open else "Show sidebar panel (Ctrl+B)")
         self.win.update_sidebar_reveal()
 
     def show_panel(self, key: str) -> None:
@@ -4781,7 +4881,8 @@ class ResourceGovernor(QObject):
 EXT_SHIM_JS = r"""(function(){
 if(window.__abExt)return;window.__abExt=true;
 const E=__EXT__;
-const api=(op,params)=>fetch('awesome://extapi/'+E.id+'/'+op+'?'+new URLSearchParams(Object.assign({t:E.token},params||{}))).then(r=>r.json());
+const api=(op,params)=>fetch('awesome://extapi/'+E.id+'/'+op+'?'+new URLSearchParams(params||{}),
+  {headers:{'X-AwesomeBrowser-Extension':E.token}}).then(r=>r.json());
 const LS='__abext_'+E.id;
 const lsGet=()=>{try{return JSON.parse(localStorage.getItem(LS)||'{}')}catch(e){return{}}};
 const lsSet=d=>{try{localStorage.setItem(LS,JSON.stringify(d))}catch(e){}};
@@ -4802,15 +4903,15 @@ const msg=(n,subs)=>{const m=E.messages[n];if(!m)return'';let t=m.message||'';[]
 const ev=()=>({addListener(){},removeListener(){},hasListener(){return false}});
 const port=()=>({postMessage(){},disconnect(){},onMessage:ev(),onDisconnect:ev()});
 const chrome={
-  runtime:{id:E.id,getURL:p=>'awesome://ext/'+E.id+'/'+String(p).replace(/^\//,''),getManifest:()=>E.manifest,
+  runtime:{id:E.id,getURL:p=>E.base+String(p).replace(/^\//,''),getManifest:()=>E.manifest,
     sendMessage(){const cb=[].slice.call(arguments).pop();if(typeof cb==='function')setTimeout(()=>cb(undefined),0);else return Promise.resolve(undefined)},
     connect:port,onMessage:ev(),onConnect:ev(),onInstalled:ev(),onStartup:ev(),lastError:undefined,
-    openOptionsPage(){if(E.options)window.open('awesome://ext/'+E.id+'/'+E.options)}},
-  extension:{getURL:p=>'awesome://ext/'+E.id+'/'+String(p).replace(/^\//,''),inIncognitoContext:false},
+    openOptionsPage(){if(E.options)window.open(E.base+E.options)}},
+  extension:{getURL:p=>E.base+String(p).replace(/^\//,''),inIncognitoContext:false},
   storage:{local:area(),sync:area(),managed:area(),onChanged:{addListener(f){listeners.push(f)},removeListener(f){const i=listeners.indexOf(f);if(i>=0)listeners.splice(i,1)},hasListener(f){return listeners.includes(f)}}},
   i18n:{getMessage:msg,getUILanguage:()=>navigator.language},
   tabs:{query(q,cb){return done(Promise.resolve([]),cb)},create(o){window.open(o&&o.url)},sendMessage(){},onUpdated:ev(),onActivated:ev()},
-  permissions:{contains(p,cb){return done(Promise.resolve(true),cb)},request(p,cb){return done(Promise.resolve(true),cb)}},
+  permissions:{contains(_p,cb){return done(Promise.resolve(false),cb)},request(_p,cb){return done(Promise.resolve(false),cb)}},
   action:{setBadgeText(){},setBadgeBackgroundColor(){},setIcon(){},setTitle(){},onClicked:ev()},
   browserAction:{setBadgeText(){},setBadgeBackgroundColor(){},setIcon(){},setTitle(){},onClicked:ev()},
   alarms:{create(){},clear(){},onAlarm:ev()},
@@ -4838,6 +4939,14 @@ class ExtensionManager(QObject):
         self.dir.mkdir(parents=True, exist_ok=True)
         self._cache: dict[str, list] = {}
         self._nam = None
+        rows = self.store["extensions"]
+        changed = False
+        for rec in rows:
+            if not re.fullmatch(r"[0-9a-f]{32}", str(rec.get("api_token", ""))):
+                rec["api_token"] = secrets.token_hex(16)
+                changed = True
+        if changed:
+            self.store.set("extensions", rows)
 
     # records ----------------------------------------------------------------
     def records(self) -> list[dict]:
@@ -4847,18 +4956,36 @@ class ExtensionManager(QObject):
         return next((r for r in self.records() if r["id"] == ext_id), None)
 
     def _read_manifest(self, root: Path) -> dict:
-        return json.loads((root / "manifest.json").read_text(encoding="utf-8-sig"))
+        root = root.resolve()
+        manifest_file = root / "manifest.json"
+        if root not in manifest_file.resolve().parents:
+            raise ValueError("The extension manifest must be inside its folder.")
+        if manifest_file.stat().st_size > 2_000_000:
+            raise ValueError("The extension manifest is too large.")
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8-sig"))
+        if not isinstance(manifest, dict):
+            raise ValueError("The extension manifest must be a JSON object.")
+        return manifest
 
     @staticmethod
     def _messages(root: Path, manifest: dict) -> dict:
         loc = manifest.get("default_locale")
         for cand in filter(None, (loc, "en", "en_US")):
+            if not isinstance(cand, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,48}", cand):
+                continue
             f = root / "_locales" / cand / "messages.json"
-            if f.is_file():
+            try:
+                resolved = f.resolve()
+                if root.resolve() not in resolved.parents or not resolved.is_file() or resolved.stat().st_size > 2_000_000:
+                    continue
                 try:
-                    return {k.lower(): v for k, v in json.loads(f.read_text(encoding="utf-8-sig")).items()}
-                except ValueError:
+                    data = json.loads(resolved.read_text(encoding="utf-8-sig"))
+                    if isinstance(data, dict):
+                        return {str(k).lower(): v for k, v in data.items() if isinstance(v, dict)}
+                except (OSError, ValueError):
                     pass
+            except OSError:
+                pass
         return {}
 
     def _tr(self, text, msgs: dict) -> str:
@@ -4869,42 +4996,196 @@ class ExtensionManager(QObject):
         return text
 
     # install / remove -------------------------------------------------------
+    @staticmethod
+    def _safe_extract(archive, dest: Path) -> None:
+        infos = archive.infolist()
+        if not infos or len(infos) > 3000:
+            raise ValueError("The package has an invalid number of files.")
+        root = dest.resolve()
+        total = 0
+        written_total = 0
+        for info in infos:
+            name = info.filename
+            if (not name or "\\" in name or name.startswith("/") or "\x00" in name
+                    or re.match(r"^[A-Za-z]:", name)):
+                raise ValueError("The package contains an unsafe file path.")
+            parts = name.rstrip("/").split("/")
+            if any(part in ("", ".", "..") for part in parts):
+                raise ValueError("The package contains an unsafe file path.")
+            mode = (info.external_attr >> 16) & 0o170000
+            if mode == 0o120000:
+                raise ValueError("Symbolic links are not allowed in extension packages.")
+            if info.flag_bits & 0x1:
+                raise ValueError("Encrypted extension packages are not supported.")
+            if info.file_size > 25_000_000:
+                raise ValueError("A package file exceeds the 25 MB limit.")
+            total += info.file_size
+            if total > 100_000_000:
+                raise ValueError("The uncompressed package exceeds the 100 MB limit.")
+            target = (dest / Path(*parts)).resolve()
+            if target != root and root not in target.parents:
+                raise ValueError("The package contains an unsafe file path.")
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists():
+                raise ValueError("The package contains duplicate file paths.")
+            written = 0
+            with archive.open(info) as source, target.open("xb") as output:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    written_total += len(chunk)
+                    if written > 25_000_000:
+                        raise ValueError("A package file exceeds the 25 MB limit.")
+                    if written_total > 100_000_000:
+                        raise ValueError("The uncompressed package exceeds the 100 MB limit.")
+                    output.write(chunk)
+            if written != info.file_size:
+                raise ValueError("A package file has an invalid size.")
+
+    @staticmethod
+    def _tree_size(root: Path) -> tuple[int, int]:
+        size, count = 0, 0
+        for path in root.rglob("*"):
+            if {".git", "node_modules"}.intersection(path.relative_to(root).parts):
+                continue
+            if path.is_symlink():
+                raise ValueError("Symbolic links are not allowed in extensions.")
+            count += 1
+            if count > 3000:
+                raise ValueError("The extension contains too many files and folders.")
+            if path.is_file():
+                if path.stat().st_size > 25_000_000:
+                    raise ValueError("The extension contains too many or oversized files.")
+                size += path.stat().st_size
+                if size > 100_000_000:
+                    raise ValueError("The extension exceeds the 100 MB size limit.")
+        return size, count
+
+    def _confirm_install(self, manifest: dict, ext_id: str) -> bool:
+        permissions = manifest.get("permissions") or []
+        hosts = manifest.get("host_permissions") or []
+        if not isinstance(permissions, list):
+            permissions = []
+        if not isinstance(hosts, list):
+            hosts = []
+        remaining = []
+        for permission in permissions:
+            value = str(permission)
+            if value == "<all_urls>" or re.match(r"^(?:\*|https?|file|ftp)://", value):
+                hosts.append(value)
+            else:
+                remaining.append(permission)
+        permissions = remaining
+        content_scripts = manifest.get("content_scripts") or []
+        for cs in (content_scripts if isinstance(content_scripts, list) else []):
+            if isinstance(cs, dict) and isinstance(cs.get("matches"), list):
+                hosts.extend(cs["matches"])
+        permissions = [str(p)[:120] for p in permissions[:40]]
+        hosts = [str(h)[:200] for h in hosts[:60]]
+        broad = any(h in ("<all_urls>", "*://*/*", "http://*/*", "https://*/*") for h in hosts)
+        scope = "All websites" if broad else (", ".join(hosts) if hosts else "No website access listed")
+        requested = ", ".join(permissions) if permissions else "No browser permissions listed"
+        name = str(manifest.get("name") or ext_id)[:120]
+        message = (f"{name} is third-party code and has not been reviewed by AwesomeBrowse. "
+                   "Extensions can change web pages where they run. Review the access it requests before installing.\n\n"
+                   f"Browser permissions: {requested}\n\nWebsite access: {scope}")
+        box = QMessageBox(QApplication.activeWindow())
+        box.setWindowTitle("Review extension access")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(message)
+        box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.button(QMessageBox.StandardButton.Yes).setText("Install extension")
+        return box.exec() == QMessageBox.StandardButton.Yes
+
     def install_dir(self, src: Path, ext_id: str | None = None) -> tuple[bool, str]:
         try:
-            manifest = self._read_manifest(src)
-        except (OSError, ValueError):
-            return False, "That folder has no readable manifest.json."
-        if manifest.get("manifest_version") not in (2, 3):
-            return False, "Only Manifest V2 and V3 extensions are supported."
+            src = src.resolve(strict=True)
+            if not src.is_dir():
+                return False, "Choose an extension folder."
+            self._tree_size(src)
+        except (OSError, ValueError, RuntimeError) as e:
+            return False, str(e) or "Choose a readable extension folder."
         ext_id = ext_id or folder_extension_id(str(src))
+        if not re.fullmatch(r"[a-p]{32}", ext_id):
+            return False, "That extension has an invalid ID."
         dest = self.dir / ext_id
+        stage = self.dir / (".stage-" + uuid.uuid4().hex)
         try:
+            shutil.copytree(src, stage, symlinks=True, ignore=shutil.ignore_patterns(".git", "node_modules"))
+            self._tree_size(stage)
+            manifest = self._read_manifest(stage)
+            if manifest.get("manifest_version") not in (2, 3):
+                shutil.rmtree(stage, ignore_errors=True)
+                return False, "Only Manifest V2 and V3 extensions are supported."
+            if not self._confirm_install(manifest, ext_id):
+                shutil.rmtree(stage, ignore_errors=True)
+                return False, "Installation cancelled."
+            old_dir = self.dir / (".old-" + uuid.uuid4().hex)
             if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".git", "node_modules"))
-        except OSError as e:
+                os.replace(dest, old_dir)
+            try:
+                os.replace(stage, dest)
+            except OSError:
+                if old_dir.exists() and not dest.exists():
+                    os.replace(old_dir, dest)
+                raise
+            shutil.rmtree(old_dir, ignore_errors=True)
+        except (OSError, ValueError, RuntimeError) as e:
+            shutil.rmtree(stage, ignore_errors=True)
             return False, f"Couldn't copy the extension: {e}"
         msgs = self._messages(dest, manifest)
-        icons = manifest.get("icons") or (manifest.get("action") or manifest.get("browser_action") or {}).get("default_icon") or {}
+        action_info = manifest.get("action") or manifest.get("browser_action") or {}
+        if not isinstance(action_info, dict):
+            action_info = {}
+        icons = manifest.get("icons") or action_info.get("default_icon") or {}
         if isinstance(icons, str):
             icons = {"48": icons}
-        icon = icons[max(icons, key=lambda k: int(re.sub(r"\D", "", k) or 0))] if icons else ""
-        act = manifest.get("action") or manifest.get("browser_action") or {}
+        if not isinstance(icons, dict):
+            icons = {}
+        icon = str(icons[max(icons, key=lambda k: int(re.sub(r"\D", "", str(k)) or 0))])[:300] if icons else ""
+        act = action_info
         old = self.get(ext_id)
         used = {r["world"] for r in self.records() if r["id"] != ext_id}
-        world = old["world"] if old else next(w for w in range(10, 250) if w not in used)
+        available_worlds = [w for w in range(10, 250) if w not in used]
+        if not old and not available_worlds:
+            shutil.rmtree(dest, ignore_errors=True)
+            return False, "AwesomeBrowse has reached its supported extension limit."
+        old_world = old.get("world") if isinstance(old, dict) else None
+        world = old_world if isinstance(old_world, int) and 10 <= old_world < 250 else (available_worlds[0] if available_worlds else 10)
         bg = manifest.get("background") or {}
+        if not isinstance(bg, dict):
+            bg = {}
+        perm_list = manifest.get("permissions") or []
+        host_list = manifest.get("host_permissions") or []
+        if not isinstance(perm_list, list):
+            perm_list = []
+        if not isinstance(host_list, list):
+            host_list = []
+        content_scripts = manifest.get("content_scripts") or []
+        if not isinstance(content_scripts, list):
+            content_scripts = []
+        options_ui = manifest.get("options_ui") or {}
+        if not isinstance(options_ui, dict):
+            options_ui = {}
         rec = {
-            "id": ext_id, "name": self._tr(manifest.get("name"), msgs) or ext_id,
-            "version": str(manifest.get("version", "")), "description": self._tr(manifest.get("description"), msgs),
+            "id": ext_id, "name": self._tr(manifest.get("name"), msgs)[:120] or ext_id,
+            "version": str(manifest.get("version", ""))[:40], "description": self._tr(manifest.get("description"), msgs)[:500],
             "enabled": old["enabled"] if old else True, "world": world, "icon": icon,
-            "popup": act.get("default_popup", ""), "options": (manifest.get("options_ui") or {}).get("page")
-            or manifest.get("options_page", ""),
-            "permissions": [str(p) for p in (manifest.get("permissions") or [])][:40],
-            "hosts": [str(h) for h in (manifest.get("host_permissions") or [])][:40],
-            "content": len(manifest.get("content_scripts") or []),
+            "popup": str(act.get("default_popup", ""))[:300], "options": str(options_ui.get("page")
+            or manifest.get("options_page", ""))[:300],
+            "permissions": [str(p)[:120] for p in perm_list[:40]],
+            "hosts": [str(h)[:200] for h in host_list[:40]],
+            "content": len(content_scripts),
             "background": bool(bg.get("service_worker") or bg.get("scripts") or bg.get("page")),
             "mv": manifest.get("manifest_version"),
+            "api_token": old.get("api_token") if old else secrets.token_hex(16),
         }
         recs = [r for r in self.records() if r["id"] != ext_id] + [rec]
         self.store.set("extensions", recs)
@@ -4915,11 +5196,16 @@ class ExtensionManager(QObject):
         import tempfile
         import zipfile
         try:
-            data = crx_zip_bytes(Path(path).read_bytes())
+            package = Path(path)
+            if package.stat().st_size > 50_000_000:
+                return False, "Extension packages are limited to 50 MB."
+            data = crx_zip_bytes(package.read_bytes())
             tmp = Path(tempfile.mkdtemp(prefix="ab2ext_"))
             with zipfile.ZipFile(io.BytesIO(data)) as z:
-                z.extractall(tmp)
-        except (OSError, ValueError, zipfile.BadZipFile) as e:
+                self._safe_extract(z, tmp)
+        except (OSError, ValueError, zipfile.BadZipFile, RuntimeError) as e:
+            if "tmp" in locals():
+                shutil.rmtree(tmp, ignore_errors=True)
             return False, f"Couldn't open that file: {e}"
         ok, msg = self.install_dir(tmp, self._id_from_name(path))
         shutil.rmtree(tmp, ignore_errors=True)
@@ -4945,29 +5231,40 @@ class ExtensionManager(QObject):
         req.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,
                          QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy)
         reply = self._nam.get(req)
+        reply.downloadProgress.connect(lambda received, _total, r=reply: r.abort() if received > 50_000_000 else None)
         reply.finished.connect(lambda r=reply, i=ext_id: self._store_done(r, i))
         self.message.emit("Downloading from the Chrome Web Store\u2026")
 
     def _store_done(self, reply, ext_id: str) -> None:
         import tempfile
         import zipfile
+        tmp = None
         try:
             if reply.error() != QNetworkReply.NetworkError.NoError:
                 self.message.emit(f"Download failed: {reply.errorString()}")
                 return
+            if reply.bytesAvailable() > 50_000_000:
+                reply.abort()
+                self.message.emit("Extension packages are limited to 50 MB.")
+                return
             data = bytes(reply.readAll())
+            if len(data) > 50_000_000:
+                self.message.emit("Extension packages are limited to 50 MB.")
+                return
             if len(data) < 100:
                 self.message.emit("The store didn't return a package for that ID.")
                 return
             tmp = Path(tempfile.mkdtemp(prefix="ab2ext_"))
             with zipfile.ZipFile(io.BytesIO(crx_zip_bytes(data))) as z:
-                z.extractall(tmp)
+                self._safe_extract(z, tmp)
             ok, msg = self.install_dir(tmp, ext_id)
             shutil.rmtree(tmp, ignore_errors=True)
             self.message.emit(msg)
-        except (ValueError, OSError, zipfile.BadZipFile) as e:
+        except (ValueError, OSError, zipfile.BadZipFile, RuntimeError) as e:
             self.message.emit(f"Couldn't install: {e}")
         finally:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
             reply.deleteLater()
 
     def remove(self, ext_id: str) -> None:
@@ -4987,7 +5284,12 @@ class ExtensionManager(QObject):
         if not re.fullmatch(r"[a-p]{32}", ext_id) or not self.get(ext_id):
             return None
         root = (self.dir / ext_id).resolve()
-        f = (root / rel.lstrip("/")).resolve()
+        if not isinstance(rel, str) or "\\" in rel:
+            return None
+        path = Path(rel.lstrip("/"))
+        if path.is_absolute() or ".." in path.parts:
+            return None
+        f = (root / path).resolve()
         if root not in f.parents or not f.is_file() or f.name.startswith("__"):
             return None
         mt = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
@@ -4996,7 +5298,9 @@ class ExtensionManager(QObject):
         return f.read_bytes(), mt
 
     def api(self, ext_id: str, op: str, params: dict) -> bytes:
-        if params.get("t") != self.ctx.app.ext_token or not re.fullmatch(r"[a-p]{32}", ext_id) or not self.get(ext_id):
+        rec = self.get(ext_id) if re.fullmatch(r"[a-p]{32}", ext_id or "") else None
+        token = str(params.pop("_token", ""))
+        if not rec or not hmac.compare_digest(token, str(rec.get("api_token", ""))):
             return b'{"ok":false}'
         f = self.dir / ext_id / "__storage.json"
         try:
@@ -5033,14 +5337,23 @@ class ExtensionManager(QObject):
 
     def _read(self, root: Path, rel: str) -> str:
         try:
-            return (root / rel).read_text(encoding="utf-8-sig")
-        except OSError:
+            if not isinstance(rel, str) or "\\" in rel:
+                return ""
+            path = Path(rel)
+            if path.is_absolute() or ".." in path.parts:
+                return ""
+            base = root.resolve()
+            f = (base / path).resolve()
+            if base not in f.parents or not f.is_file() or f.stat().st_size > 25_000_000:
+                return ""
+            return f.read_text(encoding="utf-8-sig")
+        except (OSError, ValueError):
             return ""
 
     def _shim(self, rec: dict, manifest: dict, root: Path) -> str:
         info = {"id": rec["id"], "manifest": {k: manifest.get(k) for k in ("name", "version", "manifest_version", "description")},
                 "messages": self._messages(root, manifest), "options": rec.get("options", ""),
-                "token": self.ctx.app.ext_token}
+                "token": rec.get("api_token", ""), "base": f"{SCHEME}://{rec['id']}/"}
         return EXT_SHIM_JS.replace("__EXT__", safe_json(info))
 
     def _build(self, rec: dict) -> list:
@@ -5057,15 +5370,28 @@ class ExtensionManager(QObject):
         page_script.setWorldId(0)
         page_script.setInjectionPoint(IP.DocumentCreation)
         page_script.setRunsOnSubFrames(True)
-        page_script.setSourceCode(f"if(location.href.indexOf('awesome://ext/{rec['id']}/')===0){{{shim}}}")
+        page_script.setSourceCode(f"if(location.host==={json.dumps(rec['id'])}){{{shim}}}")
         scripts.append(page_script)
-        for n, cs in enumerate(manifest.get("content_scripts") or []):
-            inc = [r for r in (match_pattern_regex(m) for m in cs.get("matches", [])) if r]
-            exc = [r for r in (match_pattern_regex(m) for m in cs.get("exclude_matches", [])) if r]
+        content_scripts = manifest.get("content_scripts") or []
+        if not isinstance(content_scripts, list):
+            return scripts
+        for n, cs in enumerate(content_scripts[:100]):
+            if not isinstance(cs, dict):
+                continue
+            matches = cs.get("matches", [])
+            if not isinstance(matches, list):
+                continue
+            inc = [r for r in (match_pattern_regex(m) for m in matches[:100] if isinstance(m, str)) if r]
+            excludes = cs.get("exclude_matches", [])
+            if not isinstance(excludes, list):
+                excludes = []
+            exc = [r for r in (match_pattern_regex(m) for m in excludes[:100] if isinstance(m, str)) if r]
             if not inc:
                 continue
-            js = "\n;\n".join(self._read(root, f) for f in cs.get("js", []))
-            css = "\n".join(self._read(root, f) for f in cs.get("css", []))
+            js_files = cs.get("js", []) if isinstance(cs.get("js", []), list) else []
+            css_files = cs.get("css", []) if isinstance(cs.get("css", []), list) else []
+            js = "\n;\n".join(self._read(root, f) for f in js_files[:100])
+            css = "\n".join(self._read(root, f) for f in css_files[:100])
             css_js = (f"(function(){{var s=document.createElement('style');s.textContent={json.dumps(css)};"
                       f"(document.head||document.documentElement).appendChild(s)}})();") if css else ""
             test = (f"(function(){{var u=location.href.split('#')[0];var I={json.dumps(inc)},X={json.dumps(exc)};"
@@ -5075,8 +5401,9 @@ class ExtensionManager(QObject):
             sc = QWebEngineScript()
             sc.setName(f"ab-ext-{rec['id']}-{n}")
             sc.setWorldId(0 if main_world else int(rec["world"]))
+            run_at = cs.get("run_at")
             sc.setInjectionPoint({"document_start": IP.DocumentCreation, "document_end": IP.DocumentReady}.get(
-                cs.get("run_at"), IP.Deferred))
+                run_at, IP.Deferred) if isinstance(run_at, str) else IP.Deferred)
             sc.setRunsOnSubFrames(bool(cs.get("all_frames")))
             sc.setSourceCode(code)
             scripts.append(sc)
@@ -5106,7 +5433,7 @@ class ExtPopup(QDialog):
         lay.setContentsMargins(0, 0, 0, 0)
         self.view = QWebEngineView()
         self.view.setPage(WebPage(win.ctx, win, self.view))
-        self.view.load(QUrl(f"{SCHEME}://ext/{rec['id']}/{rec['popup']}"))
+        self.view.load(QUrl(f"{SCHEME}://{rec['id']}/{rec['popup']}"))
         lay.addWidget(self.view)
 
 
@@ -5417,7 +5744,11 @@ class MainWindow(QMainWindow):
         self.apply_theme()
         self.refresh_bookmarks_bar()
         self.refresh_extension_button()
-        if store["sidebar_open"] or store["sidebar_always_visible"]:
+        if store["sidebar_always_visible"]:
+            if store["sidebar_open"]:
+                store.set("sidebar_open", False)
+            self.sidebar.rail.setVisible(True)
+        elif store["sidebar_open"]:
             self.sidebar.set_open(True, animate=False)
 
     def _build_ui(self) -> None:
@@ -5805,8 +6136,10 @@ class MainWindow(QMainWindow):
         elif key in ("wallpaper", "wallpaper_dim", "wallpaper_blur"):
             self.wallpaper_layer.set_wallpaper()
         elif key == "sidebar_always_visible":
-            if self.store[key]:
-                self.sidebar.set_open(True)
+            if self.store[key] and self.sidebar.is_open:
+                self.sidebar.set_open(False)
+            else:
+                self.sidebar.rail.setVisible(self.sidebar.is_open or bool(self.store[key]))
             self.update_sidebar_reveal()
 
     def current_view(self) -> WebView | None:
@@ -6398,6 +6731,7 @@ class MainWindow(QMainWindow):
         ws.addSeparator()
         add_action(ws, "Save workspace\u2026", self.save_workspace)
         add_action(m, "Extensions", lambda: self.open_internal("extensions"))
+        add_action(m, "Awesome Extensions Store", lambda: self.open_internal("extensionstore"))
         m.addSeparator()
         bm = style_popup(m.addMenu("Bookmarks"))
         add_action(bm, "Bookmark this tab", self.toggle_bookmark, "Ctrl+D")
@@ -7082,6 +7416,7 @@ class MainWindow(QMainWindow):
             cmd("Bookmarks", "Ctrl+Shift+O", lambda: self.open_internal("bookmarks")),
             cmd("Settings", "Ctrl+,", lambda: self.open_internal("settings")),
             cmd("Extensions", "Install and manage", lambda: self.open_internal("extensions"), "chrome addon"),
+            cmd("Awesome Extensions Store", "Browse the upcoming extension catalogue", lambda: self.open_internal("extensionstore"), "addons store"),
             cmd("Clear browsing data", "Ctrl+Shift+Del", lambda: self.open_internal("settings/privacy"), "cookies cache"),
             cmd("Developer tools", "F12", lambda: self.open_devtools(self.current_view()), "inspect"),
             cmd("View page source", "Ctrl+U", self.view_source), cmd("Find in page", "Ctrl+F", self.open_find),
@@ -7172,11 +7507,12 @@ class MainWindow(QMainWindow):
                 if r["popup"] and r["enabled"]:
                     add_action(sub, "Open popup", lambda r=r: self.open_ext_popup(r))
                 if r["options"]:
-                    add_action(sub, "Options", lambda r=r: self.open_url(f"{SCHEME}://ext/{r['id']}/{r['options']}"))
+                    add_action(sub, "Options", lambda r=r: self.open_url(f"{SCHEME}://{r['id']}/{r['options']}"))
                 add_action(sub, "Turn off" if r["enabled"] else "Turn on",
                            lambda r=r: (ext.set_enabled(r["id"], not r["enabled"]), self.toast("Reload open tabs to apply the change")))
                 add_action(sub, "Remove", lambda r=r: self._remove_ext(r))
             m.addSeparator()
+            add_action(m, "Awesome Extensions Store", lambda: self.open_internal("extensionstore"))
             add_action(m, "Manage extensions", lambda: self.open_internal("extensions"))
         m.exec(self.ext_btn.mapToGlobal(QPoint(0, self.ext_btn.height() + 2)))
 
@@ -8041,7 +8377,7 @@ class SetupWizard(QDialog):
         l.addSpacing(10)
         self.version_group = QButtonGroup(self)
         for key, title, desc, tag in (
-                ("stable", "2.1.2-Renovo GA", "The first general release: customizable sidebar, AI companion, live download progress, print preview, "
+                ("stable", "2.1.21-Renovo Hotfix", "The first Renovo hotfix: customizable sidebar, AI companion, live download progress, print preview, "
                  "floating tabs, YouTube Music, and live wallpapers.", "Recommended"),
                 ("nightly", "Classic 2.1", "The earlier AwesomeBrowse 2 look with tab groups, extensions and the memory limiter.", ""),
                 ("legacy", "2.0.0 Legacy", "The classic interface, without the sidebar or animations.", "")):
@@ -8218,7 +8554,6 @@ class BrowserApp(QObject):
     def __init__(self, qapp: QApplication, root: Path, safe_mode: bool = False):
         super().__init__()
         self.qapp, self.root = qapp, root
-        self.ext_token = uuid.uuid4().hex
         (root / "profiles").mkdir(parents=True, exist_ok=True)
         self.state_path = root / "state.json"
         self.state = {"last": None, "trash": [], "ram": {}, "dirty": False}
@@ -8440,15 +8775,16 @@ class BrowserApp(QObject):
             return html.encode("utf-8"), "text/html; charset=utf-8"
         if host == "about":
             host, path = "settings", "/about"
-        if host == "ext":
-            parts = path.lstrip("/").split("/", 1)
-            return ctx.extensions.serve(parts[0], parts[1] if len(parts) > 1 else "") if ctx.extensions else None
+        if re.fullmatch(r"[a-p]{32}", host):
+            return ctx.extensions.serve(host, path) if ctx.extensions else None
         if host == "extapi":
             parts = path.lstrip("/").split("/", 1)
             if not ctx.extensions or len(parts) != 2:
                 return None
             from urllib.parse import parse_qsl
-            return ctx.extensions.api(parts[0], parts[1], dict(parse_qsl(query))), "application/json"
+            params = dict(parse_qsl(query))
+            params["_token"] = params.pop("_token_header", "")
+            return ctx.extensions.api(parts[0], parts[1], params), "application/json"
         if host == "wallpaper":
             if path.startswith("/user/"):
                 name = os.path.basename(path[6:])
@@ -8498,11 +8834,15 @@ class BrowserApp(QObject):
                                 ["Qt WebEngine", self.qt_version()], ["Profile folder", str(store.dir)],
                                 ["Mode", "Private" if ctx.private else "Standard"]])
             return render_template(SETTINGS_HTML, store, state), "text/html"
+        if host == "extensionstore":
+            return render_template(EXTENSION_STORE_HTML, store, {}), "text/html"
         if host == "extensions":
             recs = []
             if ctx.extensions:
                 for r in ctx.extensions.records():
-                    recs.append({**r, "icon_url": f"{SCHEME}://ext/{r['id']}/{r['icon']}" if r["icon"] else ""})
+                    safe_record = {k: v for k, v in r.items() if k != "api_token"}
+                    safe_record["icon_url"] = f"{SCHEME}://{r['id']}/{r['icon']}" if r["icon"] else ""
+                    recs.append(safe_record)
             return render_template(EXT_HTML, store, {"extensions": recs, "private": ctx.private}), "text/html"
         if host in ("history", "bookmarks", "downloads"):
             state = {"page": host, "history": store["history"][:2000] if not ctx.private else [],
@@ -8524,7 +8864,11 @@ class BrowserApp(QObject):
 def register_scheme() -> None:
     scheme = QWebEngineUrlScheme(QByteArray(SCHEME.encode()))
     scheme.setSyntax(QWebEngineUrlScheme.Syntax.Host)
-    scheme.setFlags(QWebEngineUrlScheme.Flag.SecureScheme | QWebEngineUrlScheme.Flag.CorsEnabled)
+    flags = QWebEngineUrlScheme.Flag.SecureScheme | QWebEngineUrlScheme.Flag.CorsEnabled
+    fetch_api = getattr(QWebEngineUrlScheme.Flag, "FetchApiAllowed", None)
+    if fetch_api is not None:
+        flags |= fetch_api
+    scheme.setFlags(flags)
     QWebEngineUrlScheme.registerScheme(scheme)
 
 
